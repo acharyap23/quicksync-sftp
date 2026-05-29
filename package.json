@@ -1,0 +1,74 @@
+{
+  "name": "quicksync-sftp",
+  "displayName": "QuickSync SFTP",
+  "description": "One-click SFTP sync for your workspace",
+  "version": "0.1.0",
+  "publisher": "Prem",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acharyap23/quicksync-sftp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/acharyap23/quicksync-sftp/issues"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["workspaceContains:**/.vscode/quicksync.json"],
+  "main": "./extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "QuickSync reads connection settings from the workspace and opens outbound SFTP connections, so it only runs in trusted workspaces."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "quicksync.syncAll",
+        "title": "QuickSync: Sync All to Remote"
+      },
+      {
+        "command": "quicksync.syncChanged",
+        "title": "QuickSync: Sync Changed Files"
+      },
+      {
+        "command": "quicksync.initConfig",
+        "title": "QuickSync: Create Config File"
+      },
+      {
+        "command": "quicksync.resetHostKey",
+        "title": "QuickSync: Reset Host Key"
+      },
+      {
+        "command": "quicksync.clearCredentials",
+        "title": "QuickSync: Clear Saved Credentials"
+      }
+    ],
+    "configuration": {
+      "title": "QuickSync SFTP",
+      "properties": {
+        "quicksync.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the sync button in the status bar"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "quicksync.syncChanged",
+        "key": "ctrl+alt+s",
+        "mac": "cmd+alt+s"
+      }
+    ]
+  },
+  "dependencies": {
+    "ssh2-sftp-client": "^10.0.3"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0"
+  }
+}

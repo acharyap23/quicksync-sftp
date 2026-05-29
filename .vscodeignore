@@ -1,0 +1,6 @@
+.vscode/**
+.github/**
+.gitignore
+**/*.map
+**/*.vsix
+node_modules/.cache/**
