@@ -7,6 +7,7 @@ compare.js
 safety.js
 dualPane.js
 sites.js
+siteEditor.js
 audit.js
 esbuild.js
 .vscode/**

@@ -8,6 +8,7 @@
 const vscode = require('vscode');
 const path = require('path');
 const os = require('os');
+const { openSiteEditor } = require('./siteEditor');
 
 const STORE_KEY = 'quicksync.sites.v1';
 const ACTIVE_KEY = 'quicksync.activeSite';
@@ -145,92 +146,6 @@ class SitesTreeProvider {
   }
 }
 
-// ---------- Input flow ----------
-
-async function promptSite(ctx, store, existing) {
-  const e = existing || {};
-  const siteName = await vscode.window.showInputBox({ prompt: 'Site name', value: e.siteName || '', ignoreFocusOut: true });
-  if (siteName === undefined) return null;
-  const host = await vscode.window.showInputBox({ prompt: 'Host', value: e.host || '', ignoreFocusOut: true });
-  if (!host) return null;
-  const portStr = await vscode.window.showInputBox({ prompt: 'Port', value: String(e.port || 22), ignoreFocusOut: true });
-  if (portStr === undefined) return null;
-  const port = parseInt(portStr, 10) || 22;
-
-  const protoPick = await vscode.window.showQuickPick(
-    [
-      { label: 'SFTP', detail: 'SSH File Transfer Protocol (recommended)', value: 'sftp' },
-      { label: 'FTPS', detail: 'Not yet supported — coming later', value: 'ftps' },
-      { label: 'SCP', detail: 'Not yet supported — coming later', value: 'scp' },
-      { label: 'FTP', detail: '⚠ Insecure: transmits credentials in clear text', value: 'ftp' },
-    ],
-    { placeHolder: 'Protocol', ignoreFocusOut: true }
-  );
-  if (!protoPick) return null;
-  const protocol = protoPick.value;
-  if (protocol === 'ftp') {
-    await vscode.window.showWarningMessage('FTP transmits credentials insecurely. SFTP is recommended.', { modal: true }, 'I understand');
-  }
-  if (protocol !== 'sftp') {
-    vscode.window.showWarningMessage(`QuickSync currently transports SFTP only. The site is saved as ${protocol.toUpperCase()} but cannot connect yet.`);
-  }
-
-  const username = await vscode.window.showInputBox({ prompt: 'Username', value: e.username || '', ignoreFocusOut: true });
-  if (!username) return null;
-  const remotePath = await vscode.window.showInputBox({
-    prompt: 'Remote root directory (absolute, no "..")',
-    value: e.remotePath || '/',
-    ignoreFocusOut: true,
-    validateInput: (v) => (v && v.startsWith('/') && !v.split('/').includes('..') ? null : 'Must be an absolute path without ".." segments'),
-  });
-  if (!remotePath) return null;
-
-  const authPick = await vscode.window.showQuickPick(
-    [
-      { label: 'SSH private key', value: 'key' },
-      { label: 'Password', value: 'password' },
-    ],
-    { placeHolder: 'Authentication method', ignoreFocusOut: true }
-  );
-  if (!authPick) return null;
-
-  const id = e.id || newId();
-  const folder = await vscode.window.showInputBox({
-    prompt: 'Folder/group (optional, e.g. Production)',
-    value: e.folder || '',
-    ignoreFocusOut: true,
-  });
-
-  let privateKeyPath = e.privateKeyPath;
-  if (authPick.value === 'key') {
-    privateKeyPath = await vscode.window.showInputBox({
-      prompt: 'Private key path (~ allowed)',
-      value: e.privateKeyPath || '~/.ssh/id_rsa',
-      ignoreFocusOut: true,
-    });
-    if (!privateKeyPath) return null;
-    const passphrase = await vscode.window.showInputBox({ prompt: 'Key passphrase (leave blank if none)', password: true, ignoreFocusOut: true });
-    if (passphrase) await ctx.secrets.store(siteSecretKey(id, 'passphrase'), passphrase);
-  } else {
-    privateKeyPath = undefined;
-    const password = await vscode.window.showInputBox({ prompt: `Password for ${username}@${host}`, password: true, ignoreFocusOut: true });
-    if (password) await ctx.secrets.store(siteSecretKey(id, 'password'), password);
-  }
-
-  return {
-    id,
-    siteName: siteName || host,
-    folder: folder || '',
-    host,
-    port,
-    protocol,
-    username,
-    privateKeyPath,
-    remotePath,
-    hostFingerprint: e.hostFingerprint,
-  };
-}
-
 // ---------- Manager / registration ----------
 
 function registerSiteManager(context, deps) {
@@ -265,21 +180,19 @@ function registerSiteManager(context, deps) {
 
   const reg = (id, fn) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
 
-  reg('quicksync.sites.new', async () => {
-    const site = await promptSite(context, store, null);
-    if (!site) return;
-    await store.save(site);
-    provider.refresh();
-    vscode.window.showInformationMessage(`QuickSync: saved site "${site.siteName}".`);
-  });
+  function openEditor(existing) {
+    openSiteEditor(context, store, existing, {
+      siteSecretKey,
+      onSaved: (site, doConnect) => {
+        provider.refresh();
+        vscode.window.showInformationMessage(`QuickSync: saved site "${site.siteName}".`);
+        if (doConnect) connectSite(site);
+      },
+    });
+  }
 
-  reg('quicksync.sites.edit', async (item) => {
-    if (!item || !item.site) return;
-    const site = await promptSite(context, store, item.site);
-    if (!site) return;
-    await store.save(site);
-    provider.refresh();
-  });
+  reg('quicksync.sites.new', () => openEditor(null));
+  reg('quicksync.sites.edit', (item) => item && item.site && openEditor(item.site));
 
   reg('quicksync.sites.duplicate', async (item) => {
     if (!item || !item.site) return;
