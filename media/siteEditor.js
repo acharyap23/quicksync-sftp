@@ -1,19 +1,11 @@
-// Webview script for the Site Editor (FileZilla-style, 4 tabs).
-// No I/O — gathers form values and posts to the host, which validates and
-// persists. Values set via .value / textContent, never innerHTML.
+// Webview script for the Site Editor (SFTP — trimmed to fields we use).
+// No I/O — gathers values and posts to the host, which validates and persists.
+// Values set via .value / textContent, never innerHTML.
 (function () {
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
   let editingId = null;
 
-  const isSftpLike = (p) => p === 'sftp' || p === 'scp';
-
-  function applyProtocol() {
-    const p = $('protocol').value;
-    $('rowEncryption').classList.toggle('hide', isSftpLike(p));
-    $('ftpWarn').classList.toggle('show', p === 'ftp');
-    $('protoWarn').classList.toggle('show', p !== 'sftp');
-  }
   function applyLogon() {
     const key = $('logonType').value === 'key';
     $('rowPassword').classList.toggle('hide', key);
@@ -33,7 +25,6 @@
     return {
       id: editingId,
       siteName: $('siteName').value.trim(),
-      protocol: $('protocol').value,
       host: $('host').value.trim(),
       port: parseInt($('port').value, 10) || 22,
       username: $('user').value.trim(),
@@ -42,9 +33,8 @@
       privateKeyPath: key ? $('keyPath').value.trim() : '',
       hostFingerprint: $('fingerprint').value.trim(),
       folder: $('folder').value.trim(),
-      maxConnections: $('limitConns').checked ? Math.max(1, parseInt($('maxConns').value, 10) || 1) : 0,
-      timeOffsetMinutes: (parseInt($('offsetH').value, 10) || 0) * 60 + (parseInt($('offsetM').value, 10) || 0),
       notes: $('notes').value,
+      maxConnections: $('limitConns').checked ? Math.max(1, parseInt($('maxConns').value, 10) || 1) : 0,
       logonType: $('logonType').value,
       password: key ? '' : $('password').value,
       passphrase: key ? $('passphrase').value : '',
@@ -63,7 +53,6 @@
     editingId = s.id || null;
     $('title').textContent = editingId ? 'Edit Site' : 'New Site';
     $('siteName').value = s.siteName || '';
-    $('protocol').value = s.protocol || 'sftp';
     $('host').value = s.host || '';
     $('port').value = s.port || 22;
     $('user').value = s.username || '';
@@ -74,24 +63,17 @@
     $('folder').value = s.folder || '';
     $('notes').value = s.notes || '';
     $('logonType').value = s.privateKeyPath ? 'key' : 'password';
-    const off = s.timeOffsetMinutes || 0;
-    $('offsetH').value = Math.trunc(off / 60);
-    $('offsetM').value = off % 60;
     $('limitConns').checked = !!(s.maxConnections && s.maxConnections > 0);
     $('maxConns').value = s.maxConnections && s.maxConnections > 0 ? s.maxConnections : 1;
     if (m.hasStoredSecret) {
       $('password').placeholder = '•••••••• (unchanged — leave blank to keep)';
       $('passphrase').placeholder = '•••••••• (unchanged — leave blank to keep)';
     }
-    applyProtocol();
     applyLogon();
     applyLimit();
   });
 
-  document.querySelectorAll('.tab').forEach((t) => {
-    if (!t.classList.contains('disabled')) t.addEventListener('click', () => showTab(t.dataset.tab));
-  });
-  $('protocol').addEventListener('change', applyProtocol);
+  document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
   $('logonType').addEventListener('change', applyLogon);
   $('limitConns').addEventListener('change', applyLimit);
   $('browseBtn').addEventListener('click', () => vscode.postMessage({ type: 'browseLocal' }));
