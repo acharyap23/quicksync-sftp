@@ -28,10 +28,21 @@ class ConnectionManager {
     this.sftp = null;
     this.cfg = null;
     this.connecting = null; // in-flight promise (single-flight)
+    this.onChange = null; // invoked on connect / disconnect / drop
   }
 
   isConnected() {
     return !!this.sftp;
+  }
+
+  _changed() {
+    if (this.onChange) {
+      try {
+        this.onChange();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   async getClient() {
@@ -46,9 +57,11 @@ class ConnectionManager {
       if (client && client.on) {
         client.on('close', () => {
           this.sftp = null;
+          this._changed();
         });
         client.on('error', () => {
           this.sftp = null;
+          this._changed();
         });
       }
       this.sftp = sftp;
@@ -56,7 +69,9 @@ class ConnectionManager {
       return sftp;
     })();
     try {
-      return await this.connecting;
+      const s = await this.connecting;
+      this._changed();
+      return s;
     } finally {
       this.connecting = null;
     }
@@ -73,6 +88,7 @@ class ConnectionManager {
         /* already gone */
       }
     }
+    this._changed();
   }
 }
 

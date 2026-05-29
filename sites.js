@@ -99,7 +99,7 @@ class SiteItem extends vscode.TreeItem {
   constructor(site, isActive, isConnected, durationText) {
     super(site.siteName || site.host, vscode.TreeItemCollapsibleState.None);
     this.site = site;
-    this.contextValue = isActive ? 'quicksyncSiteActive' : 'quicksyncSite';
+    this.contextValue = isConnected ? 'quicksyncSiteConnected' : 'quicksyncSite';
     this.description = `${site.username}@${site.host}:${site.port || 22}` + (isConnected ? `  ● ${durationText}` : '');
     this.tooltip = `${site.protocol || 'sftp'}://${site.username}@${site.host}:${site.port || 22}\n${site.remotePath || ''}`;
     this.iconPath = new vscode.ThemeIcon(isConnected ? 'vm-active' : isActive ? 'vm' : 'server-environment');
@@ -154,7 +154,7 @@ class SitesTreeProvider {
   _workspaceItem(wc) {
     const connected = this.mgr.connectedSiteId === 'workspace';
     const it = new vscode.TreeItem('Workspace config', vscode.TreeItemCollapsibleState.None);
-    it.contextValue = 'quicksyncWorkspaceSite';
+    it.contextValue = connected ? 'quicksyncWorkspaceSiteConnected' : 'quicksyncWorkspaceSite';
     it.description = `${wc.username ? wc.username + '@' : ''}${wc.host}  ${wc.remotePath || ''}` + (connected ? `  ● ${this.mgr.durationText()}` : '');
     it.tooltip = '.vscode/quicksync.json';
     it.iconPath = new vscode.ThemeIcon(connected ? 'vm-active' : 'file-code');

@@ -1151,6 +1151,14 @@ function activate(context) {
   // The connection resolves its target via resolveConfig (active site → legacy file).
   const conn = new ConnectionManager({ loadConfig: resolveConfig, connectSftp });
   connection = conn;
+  // Drive a context key + view refresh so Connect/Disconnect toggle by state.
+  const syncConnectedContext = () => {
+    vscode.commands.executeCommand('setContext', 'quicksync.connected', conn.isConnected());
+    vscode.commands.executeCommand('quicksync.sites.refresh');
+    vscode.commands.executeCommand('quicksync.remote.refresh');
+  };
+  conn.onChange = syncConnectedContext;
+  vscode.commands.executeCommand('setContext', 'quicksync.connected', false);
   transferQueue = registerTransferQueue(context, { audit: auditLogger });
   transferQueue.bindConnection(conn);
   registerRemoteExplorer(context, { loadConfig: resolveConfig, connectSftp, audit: auditLogger }, conn, transferQueue);
