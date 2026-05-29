@@ -143,6 +143,30 @@
         "command": "quicksync.syncWorkspace",
         "title": "Sync Workspace",
         "category": "QuickSync"
+      },
+      {
+        "command": "quicksync.queue.cancel",
+        "title": "Cancel",
+        "category": "QuickSync",
+        "icon": "$(close)"
+      },
+      {
+        "command": "quicksync.queue.retry",
+        "title": "Retry",
+        "category": "QuickSync",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "quicksync.queue.clear",
+        "title": "Clear Finished",
+        "category": "QuickSync",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "quicksync.queue.retryAll",
+        "title": "Retry All Failed",
+        "category": "QuickSync",
+        "icon": "$(debug-restart)"
       }
     ],
     "viewsContainers": {
@@ -160,6 +184,11 @@
           "id": "quicksyncRemote",
           "name": "Remote",
           "contextualTitle": "QuickSync Remote"
+        },
+        {
+          "id": "quicksyncQueue",
+          "name": "Transfers",
+          "contextualTitle": "QuickSync Transfers"
         }
       ]
     },
@@ -175,9 +204,13 @@
         { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote", "group": "navigation@1" },
         { "command": "quicksync.remote.refresh", "when": "view == quicksyncRemote", "group": "navigation@2" },
         { "command": "quicksync.remote.newFolder", "when": "view == quicksyncRemote", "group": "navigation@3" },
-        { "command": "quicksync.remote.disconnect", "when": "view == quicksyncRemote", "group": "1_conn" }
+        { "command": "quicksync.remote.disconnect", "when": "view == quicksyncRemote", "group": "1_conn" },
+        { "command": "quicksync.queue.retryAll", "when": "view == quicksyncQueue", "group": "navigation@1" },
+        { "command": "quicksync.queue.clear", "when": "view == quicksyncQueue", "group": "navigation@2" }
       ],
       "view/item/context": [
+        { "command": "quicksync.queue.cancel", "when": "view == quicksyncQueue && viewItem =~ /qitem-(queued|uploading)/", "group": "inline" },
+        { "command": "quicksync.queue.retry", "when": "view == quicksyncQueue && viewItem =~ /qitem-(failed|cancelled)/", "group": "inline" },
         { "command": "quicksync.remote.download", "when": "view == quicksyncRemote && viewItem =~ /quicksync(File|Dir)/", "group": "1_transfer@1" },
         { "command": "quicksync.remote.uploadHere", "when": "view == quicksyncRemote && viewItem == quicksyncDir", "group": "1_transfer@2" },
         { "command": "quicksync.remote.newFile", "when": "view == quicksyncRemote && viewItem == quicksyncDir", "group": "2_create@1" },
@@ -203,6 +236,13 @@
           "type": "boolean",
           "default": false,
           "description": "Require explicit confirmation for upload/overwrite/delete and enforce host-fingerprint pinning. Recommended for production servers."
+        },
+        "quicksync.concurrentTransfers": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 8,
+          "description": "Number of files to upload at once via the transfer queue (1 = sequential)."
         }
       }
     },

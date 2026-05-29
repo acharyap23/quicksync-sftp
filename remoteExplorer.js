@@ -168,8 +168,9 @@ const openRemoteFiles = new Map();
 
 // ---------- Registration ----------
 
-function registerRemoteExplorer(context, deps) {
-  const conn = new ConnectionManager(deps);
+function registerRemoteExplorer(context, deps, conn, queue) {
+  if (!conn) conn = new ConnectionManager(deps);
+  if (!conn.deps) conn.deps = deps;
   const provider = new RemoteTreeProvider(conn);
   const view = vscode.window.createTreeView('quicksyncRemote', {
     treeDataProvider: provider,
@@ -229,6 +230,10 @@ function registerRemoteExplorer(context, deps) {
       if (!remote) return;
       const auto = vscode.workspace.getConfiguration('quicksync').get('autoUpload', false);
       if (!auto && !(await confirm(`Upload changes to ${remote}?`, 'Upload'))) return;
+      if (queue) {
+        queue.enqueue(doc.uri.fsPath, remote, POSIX.basename(remote));
+        return;
+      }
       try {
         const sftp = await conn.getClient();
         await sftp.fastPut(doc.uri.fsPath, remote);
@@ -274,6 +279,13 @@ function registerRemoteExplorer(context, deps) {
     if (!picks || picks.length === 0) return;
     if (enterpriseMode() && !(await confirm(`Upload ${picks.length} file(s) to ${item.remotePath}?`, 'Upload')))
       return;
+    if (queue) {
+      for (const p of picks) {
+        queue.enqueue(p.fsPath, POSIX.join(item.remotePath, path.basename(p.fsPath)), path.basename(p.fsPath));
+      }
+      vscode.window.showInformationMessage(`QuickSync: queued ${picks.length} file(s).`);
+      return;
+    }
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Uploading to ${item.entry.name}` },
       async () => {
@@ -360,4 +372,4 @@ function registerRemoteExplorer(context, deps) {
   return { conn, provider, view };
 }
 
-module.exports = { registerRemoteExplorer };
+module.exports = { registerRemoteExplorer, ConnectionManager };

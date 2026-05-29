@@ -2,6 +2,7 @@
 node_modules/**
 extension.js
 remoteExplorer.js
+transferQueue.js
 esbuild.js
 .vscode/**
 .github/**

@@ -9,6 +9,7 @@ let statusBarItem;
 let lastSyncTime = 0;
 let isSyncing = false;          // M-2: single-flight lock
 let extContext = null;          // for SecretStorage + globalState
+let transferQueue = null;       // Phase 3: shared upload queue
 
 // ---------- Secret deny-list (H-1: non-overridable) ----------
 // These are ALWAYS skipped regardless of the user's ignore list. A
@@ -584,47 +585,31 @@ async function runSync(onlyChanged) {
 
 // ---------- Phase 2: manual sync commands ----------
 
-// Shared trust + single-flight guard for all manual uploads.
-async function withUploadGuard(fn) {
+function requireTrust() {
   if (!vscode.workspace.isTrusted) {
     vscode.window.showWarningMessage('QuickSync is disabled in untrusted workspaces.');
-    return;
+    return false;
   }
-  if (isSyncing) {
-    vscode.window.showInformationMessage('QuickSync: a sync is already in progress.');
-    return;
-  }
-  isSyncing = true;
-  try {
-    await fn();
-  } finally {
-    isSyncing = false;
-  }
+  return true;
 }
 
-async function uploadEntries(cfg, files, title) {
+// Push entries onto the shared transfer queue (Phase 3). Remote paths mirror
+// the workspace layout under cfg.remotePath.
+function enqueueEntries(cfg, files) {
   if (files.length === 0) {
     vscode.window.showInformationMessage('QuickSync: nothing to upload.');
     return;
   }
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title, cancellable: true },
-    async (progress, token) => {
-      try {
-        const r = await uploadFiles(cfg, files, progress, token);
-        if (r.failed === 0) {
-          vscode.window.showInformationMessage(`QuickSync: uploaded ${r.uploaded} file(s) ✓`);
-        } else {
-          vscode.window.showWarningMessage(
-            `QuickSync: ${r.uploaded} uploaded, ${r.failed} failed. ${r.errors[0] || ''}`
-          );
-        }
-      } catch (err) {
-        console.error('QuickSync error:', err);
-        vscode.window.showErrorMessage('QuickSync failed: could not complete the upload.');
-      }
-    }
-  );
+  if (!transferQueue) {
+    vscode.window.showErrorMessage('QuickSync: transfer queue unavailable.');
+    return;
+  }
+  const base = cfg.remotePath.replace(/\\/g, '/').replace(/\/$/, '');
+  for (const f of files) {
+    const remoteRel = f.rel.split(path.sep).join('/');
+    transferQueue.enqueue(f.full, base + '/' + remoteRel, f.rel);
+  }
+  vscode.window.showInformationMessage(`QuickSync: queued ${files.length} file(s) — see the QuickSync ▸ Transfers view.`);
 }
 
 // Turn a set of URIs into upload entries: files become entries (skipping
@@ -668,46 +653,44 @@ async function collectEntries(uris, root, cfg) {
 }
 
 async function syncCurrentFile() {
-  await withUploadGuard(async () => {
-    const ed = vscode.window.activeTextEditor;
-    if (!ed) {
-      vscode.window.showInformationMessage('QuickSync: no active file.');
-      return;
-    }
-    const cfg = await loadConfig();
-    if (!cfg) {
-      vscode.window.showWarningMessage('QuickSync: no config found.');
-      return;
-    }
-    await ed.document.save();
-    const root = getWorkspaceRoot();
-    const files = await collectEntries([ed.document.uri], root, cfg);
-    await uploadEntries(cfg, files, `QuickSync: uploading ${path.basename(ed.document.fileName)}`);
-  });
+  if (!requireTrust()) return;
+  const ed = vscode.window.activeTextEditor;
+  if (!ed) {
+    vscode.window.showInformationMessage('QuickSync: no active file.');
+    return;
+  }
+  const cfg = await loadConfig();
+  if (!cfg) {
+    vscode.window.showWarningMessage('QuickSync: no config found.');
+    return;
+  }
+  await ed.document.save();
+  const root = getWorkspaceRoot();
+  const files = await collectEntries([ed.document.uri], root, cfg);
+  enqueueEntries(cfg, files);
 }
 
 // Used by both "Sync Selected Files" (multi-select) and "Sync Folder".
 async function syncUris(uris) {
-  await withUploadGuard(async () => {
-    if (!uris || uris.length === 0) return;
-    const cfg = await loadConfig();
-    if (!cfg) {
-      vscode.window.showWarningMessage('QuickSync: no config found.');
-      return;
-    }
-    const root = getWorkspaceRoot();
-    const files = await collectEntries(uris, root, cfg);
-    const enterprise = vscode.workspace.getConfiguration('quicksync').get('enterpriseMode', false);
-    if (enterprise && files.length) {
-      const ok = await vscode.window.showWarningMessage(
-        `Upload ${files.length} file(s) to ${cfg.username}@${cfg.host}:${cfg.remotePath} (overwrites existing)?`,
-        { modal: true },
-        'Upload'
-      );
-      if (ok !== 'Upload') return;
-    }
-    await uploadEntries(cfg, files, `QuickSync: uploading ${files.length} file(s)`);
-  });
+  if (!requireTrust()) return;
+  if (!uris || uris.length === 0) return;
+  const cfg = await loadConfig();
+  if (!cfg) {
+    vscode.window.showWarningMessage('QuickSync: no config found.');
+    return;
+  }
+  const root = getWorkspaceRoot();
+  const files = await collectEntries(uris, root, cfg);
+  const enterprise = vscode.workspace.getConfiguration('quicksync').get('enterpriseMode', false);
+  if (enterprise && files.length) {
+    const ok = await vscode.window.showWarningMessage(
+      `Upload ${files.length} file(s) to ${cfg.username}@${cfg.host}:${cfg.remotePath} (overwrites existing)?`,
+      { modal: true },
+      'Upload'
+    );
+    if (ok !== 'Upload') return;
+  }
+  enqueueEntries(cfg, files);
 }
 
 async function initConfig() {
@@ -836,9 +819,14 @@ function activate(context) {
     vscode.commands.registerCommand('quicksync.syncWorkspace', () => runSync(false))
   );
 
-  // Phase 1: native remote explorer (reuses loadConfig/connectSftp for security).
-  const { registerRemoteExplorer } = require('./remoteExplorer');
-  registerRemoteExplorer(context, { loadConfig, connectSftp });
+  // Phases 1+3: native remote explorer + transfer queue, sharing one connection.
+  const { registerRemoteExplorer, ConnectionManager } = require('./remoteExplorer');
+  const { registerTransferQueue } = require('./transferQueue');
+  const deps = { loadConfig, connectSftp };
+  const conn = new ConnectionManager(deps);
+  transferQueue = registerTransferQueue(context);
+  transferQueue.bindConnection(conn);
+  registerRemoteExplorer(context, deps, conn, transferQueue);
 
   const showBar = vscode.workspace.getConfiguration('quicksync').get('showStatusBar', true);
   if (showBar) {
