@@ -12,6 +12,7 @@ let extContext = null;          // for SecretStorage + globalState
 let transferQueue = null;       // Phase 3: shared upload queue
 let connection = null;          // Phase 1/3: shared ConnectionManager
 const compare = require('./compare'); // Phase 4
+const safety = require('./safety'); // Phase 7
 
 // ---------- Secret deny-list (H-1: non-overridable) ----------
 // These are ALWAYS skipped regardless of the user's ignore list. A
@@ -305,6 +306,16 @@ function makeHostVerifier(cfg) {
           `Expected: ${pinned}\nReceived: ${fp}\n` +
           `This may be a man-in-the-middle attack. Connection refused. ` +
           `If the server key legitimately changed, run "QuickSync: Reset Host Key" for this host.`,
+        { modal: true }
+      );
+      return cb(false);
+    }
+
+    // Enterprise mode enforces explicit pinning — no trust-on-first-use.
+    if (enterpriseMode()) {
+      vscode.window.showErrorMessage(
+        `QuickSync (enterprise mode): refusing to trust the unverified host ${host}:${port}. ` +
+          `Set "hostFingerprint" (SHA256:…) in .vscode/quicksync.json and reconnect.`,
         { modal: true }
       );
       return cb(false);
@@ -636,9 +647,53 @@ async function compareWithRemoteCommand(uri) {
   }
 }
 
+// ---------- Phase 7: deployment safety scan ----------
+
+function enterpriseMode() {
+  return vscode.workspace.getConfiguration('quicksync').get('enterpriseMode', false);
+}
+
+function safetyIgnoreKey() {
+  return `safetyIgnore:${getWorkspaceRoot() || 'none'}`;
+}
+
+function getSafetyIgnores() {
+  return extContext.globalState.get(safetyIgnoreKey()) || [];
+}
+
+async function addSafetyIgnores(rels) {
+  const set = new Set(getSafetyIgnores());
+  rels.forEach((r) => set.add(r));
+  await extContext.globalState.update(safetyIgnoreKey(), [...set]);
+}
+
+// Returns the (possibly reduced) file list to upload, or null if cancelled.
+// Manual uploads only — auto-sync filters silently instead of prompting.
+async function reviewSensitive(files) {
+  const ignored = new Set(getSafetyIgnores());
+  let kept = files.filter((f) => !ignored.has(f.rel));
+  const flagged = safety.classify(kept).filter((x) => !ignored.has(x.rel));
+  if (flagged.length === 0) return kept;
+
+  const shown = flagged.slice(0, 8).map((x) => `• ${x.rel}  (${x.reason})`).join('\n');
+  const more = flagged.length > 8 ? `\n…and ${flagged.length - 8} more` : '';
+  const pick = await vscode.window.showWarningMessage(
+    `This upload contains ${flagged.length} potentially sensitive file(s):\n\n${shown}${more}\n\nContinue?`,
+    { modal: true },
+    'Upload Anyway',
+    'Skip Sensitive',
+    'Always Ignore These'
+  );
+  if (!pick) return null; // cancelled
+  const flaggedSet = new Set(flagged.map((x) => x.rel));
+  if (pick === 'Upload Anyway') return kept;
+  if (pick === 'Always Ignore These') await addSafetyIgnores([...flaggedSet]);
+  return kept.filter((f) => !flaggedSet.has(f.rel)); // Skip Sensitive + Always Ignore
+}
+
 // Push entries onto the shared transfer queue (Phase 3). Remote paths mirror
 // the workspace layout under cfg.remotePath.
-function enqueueEntries(cfg, files, quiet) {
+async function enqueueEntries(cfg, files, quiet) {
   if (files.length === 0) {
     if (!quiet) vscode.window.showInformationMessage('QuickSync: nothing to upload.');
     return;
@@ -646,6 +701,15 @@ function enqueueEntries(cfg, files, quiet) {
   if (!transferQueue) {
     vscode.window.showErrorMessage('QuickSync: transfer queue unavailable.');
     return;
+  }
+  // Enterprise mode: require an explicit confirmation for manual uploads.
+  if (!quiet && enterpriseMode()) {
+    const ok = await vscode.window.showWarningMessage(
+      `Upload ${files.length} file(s) to ${cfg.username}@${cfg.host}:${cfg.remotePath} (overwrites existing)?`,
+      { modal: true },
+      'Upload'
+    );
+    if (ok !== 'Upload') return;
   }
   const base = cfg.remotePath.replace(/\\/g, '/').replace(/\/$/, '');
   for (const f of files) {
@@ -724,7 +788,12 @@ async function flushAutoSync() {
       files.push({ full, rel, mtime: st.mtimeMs });
     }
   }
-  enqueueEntries(cfg, files, /* quiet */ true);
+  // Auto-sync never prompts: silently drop always-ignored + flagged-sensitive files.
+  const ignored = new Set(getSafetyIgnores());
+  files = files.filter((f) => !ignored.has(f.rel));
+  const flagged = new Set(safety.classify(files).map((x) => x.rel));
+  files = files.filter((f) => !flagged.has(f.rel));
+  await enqueueEntries(cfg, files, /* quiet */ true);
 }
 
 // Turn a set of URIs into upload entries: files become entries (skipping
@@ -781,7 +850,12 @@ async function syncCurrentFile() {
   }
   await ed.document.save();
   const root = getWorkspaceRoot();
-  const files = await collectEntries([ed.document.uri], root, cfg);
+  let files = await collectEntries([ed.document.uri], root, cfg);
+  // Phase 7: scan for potentially sensitive content.
+  const reviewed = await reviewSensitive(files);
+  if (reviewed === null) return;
+  files = reviewed;
+  if (files.length === 0) return;
   // Phase 4: compare/confirm before overwriting a differing remote file.
   if (files.length === 1 && compareBeforeOverwriteEnabled() && connection) {
     try {
@@ -793,7 +867,7 @@ async function syncCurrentFile() {
       /* compare failed — fall through to normal upload */
     }
   }
-  enqueueEntries(cfg, files);
+  await enqueueEntries(cfg, files);
 }
 
 // Used by both "Sync Selected Files" (multi-select) and "Sync Folder".
@@ -806,17 +880,12 @@ async function syncUris(uris) {
     return;
   }
   const root = getWorkspaceRoot();
-  const files = await collectEntries(uris, root, cfg);
-  const enterprise = vscode.workspace.getConfiguration('quicksync').get('enterpriseMode', false);
-  if (enterprise && files.length) {
-    const ok = await vscode.window.showWarningMessage(
-      `Upload ${files.length} file(s) to ${cfg.username}@${cfg.host}:${cfg.remotePath} (overwrites existing)?`,
-      { modal: true },
-      'Upload'
-    );
-    if (ok !== 'Upload') return;
-  }
-  enqueueEntries(cfg, files);
+  let files = await collectEntries(uris, root, cfg);
+  // Phase 7: scan for potentially sensitive content (enterprise confirm is in enqueueEntries).
+  const reviewed = await reviewSensitive(files);
+  if (reviewed === null) return;
+  files = reviewed;
+  await enqueueEntries(cfg, files);
 }
 
 async function initConfig() {
@@ -910,6 +979,12 @@ async function clearCredentials() {
   vscode.window.showInformationMessage('QuickSync: saved credentials cleared.');
 }
 
+// Phase 7: reset the per-workspace "always ignore" safety list.
+async function clearSafetyIgnores() {
+  await extContext.globalState.update(safetyIgnoreKey(), undefined);
+  vscode.window.showInformationMessage('QuickSync: cleared the safety "always ignore" list for this workspace.');
+}
+
 // ---------- Status bar ----------
 
 function setStatusBar(text, tooltip) {
@@ -944,7 +1019,9 @@ function activate(context) {
     vscode.commands.registerCommand('quicksync.syncFolder', (uri) => syncUris(uri ? [uri] : [])),
     vscode.commands.registerCommand('quicksync.syncWorkspace', () => runSync(false)),
     // Phase 4: compare
-    vscode.commands.registerCommand('quicksync.compareWithRemote', (uri) => compareWithRemoteCommand(uri))
+    vscode.commands.registerCommand('quicksync.compareWithRemote', (uri) => compareWithRemoteCommand(uri)),
+    // Phase 7: safety
+    vscode.commands.registerCommand('quicksync.clearSafetyIgnores', () => clearSafetyIgnores())
   );
 
   // Phases 1+3: native remote explorer + transfer queue, sharing one connection.

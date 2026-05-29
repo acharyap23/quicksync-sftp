@@ -173,6 +173,11 @@
         "title": "Compare with Remote",
         "category": "QuickSync",
         "icon": "$(git-compare)"
+      },
+      {
+        "command": "quicksync.clearSafetyIgnores",
+        "title": "Clear Safety \"Always Ignore\" List",
+        "category": "QuickSync"
       }
     ],
     "viewsContainers": {

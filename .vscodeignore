@@ -4,6 +4,7 @@ extension.js
 remoteExplorer.js
 transferQueue.js
 compare.js
+safety.js
 esbuild.js
 .vscode/**
 .github/**
