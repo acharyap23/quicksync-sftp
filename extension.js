@@ -134,6 +134,20 @@ async function resolveConfig() {
   return loadConfig();
 }
 
+// Lightweight, side-effect-free read of the workspace config for display in the
+// Site Manager (no migration, no secrets, no prompts). Returns null if absent.
+function getWorkspaceConfigInfo() {
+  const p = getConfigPath();
+  if (!p || !fs.existsSync(p)) return null;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!cfg || typeof cfg.host !== 'string') return null;
+    return { host: cfg.host, username: cfg.username || '', port: cfg.port || 22, remotePath: cfg.remotePath || '/' };
+  } catch {
+    return null;
+  }
+}
+
 // R2: SecretStorage is global to the extension, so a stored credential can be
 // reused from ANY workspace (incl. a malicious cloned repo that names the same
 // host/user). We track, per workspace, which host/user it has been authorized
@@ -1058,8 +1072,16 @@ function activate(context) {
     connection: conn,
     connectSftp,
     audit: auditLogger,
+    getWorkspaceConfig: getWorkspaceConfigInfo,
     onActiveChanged: () => vscode.commands.executeCommand('quicksync.remote.refresh'),
   });
+  // Refresh the Site Manager when a quicksync.json is created/edited/removed.
+  const cfgWatcher = vscode.workspace.createFileSystemWatcher('**/.vscode/quicksync.json');
+  const refreshSites = () => vscode.commands.executeCommand('quicksync.sites.refresh');
+  cfgWatcher.onDidCreate(refreshSites);
+  cfgWatcher.onDidChange(refreshSites);
+  cfgWatcher.onDidDelete(refreshSites);
+  context.subscriptions.push(cfgWatcher);
 
   // Phase 6: auto-sync on save (off by default). Baseline starts now so the
   // first save in "workspaceChanges" mode doesn't push the whole tree.

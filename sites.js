@@ -136,17 +136,30 @@ class SitesTreeProvider {
       return sites.filter((s) => (s.folder || '') === element.label).map((s) => this._siteItem(s));
     }
     if (element) return [];
-    if (sites.length === 0) {
+    const top = [];
+    // Surface the workspace .vscode/quicksync.json (if present) as a connectable entry.
+    const wc = this.mgr.getWorkspaceConfig();
+    if (wc) top.push(this._workspaceItem(wc));
+    const folders = [...new Set(sites.map((s) => s.folder).filter(Boolean))].sort();
+    for (const f of folders) top.push(new FolderItem(f));
+    for (const s of sites.filter((s) => !s.folder)) top.push(this._siteItem(s));
+    if (top.length === 0) {
       const hint = new vscode.TreeItem('No sites — click + to add one', vscode.TreeItemCollapsibleState.None);
       hint.command = { command: 'quicksync.sites.new', title: 'New Site' };
       hint.iconPath = new vscode.ThemeIcon('add');
       return [hint];
     }
-    const folders = [...new Set(sites.map((s) => s.folder).filter(Boolean))].sort();
-    const top = [];
-    for (const f of folders) top.push(new FolderItem(f));
-    for (const s of sites.filter((s) => !s.folder)) top.push(this._siteItem(s));
     return top;
+  }
+  _workspaceItem(wc) {
+    const connected = this.mgr.connectedSiteId === 'workspace';
+    const it = new vscode.TreeItem('Workspace config', vscode.TreeItemCollapsibleState.None);
+    it.contextValue = 'quicksyncWorkspaceSite';
+    it.description = `${wc.username ? wc.username + '@' : ''}${wc.host}  ${wc.remotePath || ''}` + (connected ? `  ● ${this.mgr.durationText()}` : '');
+    it.tooltip = '.vscode/quicksync.json';
+    it.iconPath = new vscode.ThemeIcon(connected ? 'vm-active' : 'file-code');
+    it.command = { command: 'quicksync.sites.connectWorkspace', title: 'Connect' };
+    return it;
   }
 }
 
@@ -170,6 +183,9 @@ function registerSiteManager(context, deps) {
     },
     getActiveConfig() {
       return this.ephemeral || siteToConfig(store.getActive());
+    },
+    getWorkspaceConfig() {
+      return deps.getWorkspaceConfig ? deps.getWorkspaceConfig() : null;
     },
   };
 
@@ -195,8 +211,42 @@ function registerSiteManager(context, deps) {
     });
   }
 
+  reg('quicksync.sites.refresh', () => provider.refresh());
   reg('quicksync.sites.new', () => openEditor(null));
   reg('quicksync.sites.edit', (item) => item && item.site && openEditor(item.site));
+
+  // Connect using the workspace .vscode/quicksync.json (clears the active site
+  // so resolveConfig falls back to that file).
+  reg('quicksync.sites.connectWorkspace', async () => {
+    if (!vscode.workspace.isTrusted) {
+      vscode.window.showWarningMessage('QuickSync is disabled in untrusted workspaces.');
+      return;
+    }
+    await deps.connection.disconnect();
+    mgr.ephemeral = null;
+    await store.setActive(null);
+    if (deps.onActiveChanged) deps.onActiveChanged();
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'QuickSync: connecting to workspace config…' },
+      async () => {
+        try {
+          await deps.connection.getClient();
+          mgr.connectedSiteId = 'workspace';
+          mgr.connectedAt = Date.now();
+          provider.refresh();
+          vscode.commands.executeCommand('quicksync.remote.refresh');
+          const c = deps.connection.cfg || {};
+          audit.log('connect', { site: 'workspace-config', host: c.host, user: c.username, protocol: 'sftp', result: 'ok' });
+          vscode.window.showInformationMessage(`QuickSync: connected to workspace config (${c.username || ''}@${c.host || ''}) ✓`);
+        } catch (err) {
+          mgr.connectedSiteId = null;
+          provider.refresh();
+          audit.log('connect', { site: 'workspace-config', result: 'failed' });
+          vscode.window.showErrorMessage(`QuickSync: connection failed — ${err.message}`);
+        }
+      }
+    );
+  });
 
   // Import a host from ~/.ssh/config and pre-fill the editor.
   reg('quicksync.sites.fromSshConfig', async () => {

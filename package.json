@@ -194,6 +194,8 @@
       { "command": "quicksync.sites.test", "title": "Test Connection", "category": "QuickSync", "icon": "$(beaker)" },
       { "command": "quicksync.sites.quickConnect", "title": "Quick Connect…", "category": "QuickSync", "icon": "$(zap)" },
       { "command": "quicksync.sites.fromSshConfig", "title": "Import from SSH config", "category": "QuickSync", "icon": "$(key)" },
+      { "command": "quicksync.sites.connectWorkspace", "title": "Connect (Workspace Config)", "category": "QuickSync", "icon": "$(plug)" },
+      { "command": "quicksync.sites.refresh", "title": "Refresh Sites", "category": "QuickSync", "icon": "$(refresh)" },
       { "command": "quicksync.remote.restore", "title": "Restore from Backup", "category": "QuickSync", "icon": "$(history)" },
       { "command": "quicksync.openAuditLog", "title": "Open Audit Log", "category": "QuickSync" }
     ],
@@ -249,6 +251,7 @@
         { "command": "quicksync.queue.clear", "when": "view == quicksyncQueue", "group": "navigation@2" }
       ],
       "view/item/context": [
+        { "command": "quicksync.sites.connectWorkspace", "when": "view == quicksyncSites && viewItem == quicksyncWorkspaceSite", "group": "inline@1" },
         { "command": "quicksync.sites.connect", "when": "view == quicksyncSites && viewItem =~ /quicksyncSite/", "group": "inline@1" },
         { "command": "quicksync.sites.test", "when": "view == quicksyncSites && viewItem =~ /quicksyncSite/", "group": "1_conn@1" },
         { "command": "quicksync.sites.edit", "when": "view == quicksyncSites && viewItem =~ /quicksyncSite/", "group": "2_edit@1" },
