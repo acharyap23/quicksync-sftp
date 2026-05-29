@@ -11,7 +11,12 @@ const vscode = require('vscode');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const crypto = require('crypto');
 const compare = require('./compare');
+
+function fileSha256(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
 
 const POSIX = path.posix;
 
@@ -164,7 +169,8 @@ async function confirm(message, action) {
   return pick === action;
 }
 
-// Map of local temp file -> remote path, for save-back of opened remote files.
+// Map of local temp file -> { remotePath, baseHash } for opened remote files.
+// baseHash is the remote content hash AT OPEN TIME, used for conflict detection.
 const openRemoteFiles = new Map();
 
 // ---------- Registration ----------
@@ -216,7 +222,8 @@ function registerRemoteExplorer(context, deps, conn, queue) {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quicksync-'));
       const local = path.join(tmpDir, path.basename(item.remotePath));
       await sftp.fastGet(item.remotePath, local);
-      openRemoteFiles.set(local, item.remotePath);
+      // Record the remote content hash at open time for conflict detection.
+      openRemoteFiles.set(local, { remotePath: item.remotePath, baseHash: fileSha256(local) });
       const doc = await vscode.workspace.openTextDocument(local);
       await vscode.window.showTextDocument(doc);
     } catch (err) {
@@ -224,34 +231,86 @@ function registerRemoteExplorer(context, deps, conn, queue) {
     }
   });
 
-  // Save-back: when a tracked temp file is saved, offer to upload it.
+  // Save-back: when a tracked remote-opened file is saved, upload it with
+  // conflict detection (did the remote change since we opened it?).
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(async (doc) => {
-      const remote = openRemoteFiles.get(doc.uri.fsPath);
-      if (!remote) return;
-      const conf = vscode.workspace.getConfiguration('quicksync');
-      const auto = conf.get('autoUpload', false);
-      if (!auto && !(await confirm(`Upload changes to ${remote}?`, 'Upload'))) return;
-      // Phase 4: optional conflict check — the remote may have changed since open.
-      if (conf.get('compareBeforeOverwrite', false) || conf.get('enterpriseMode', false)) {
-        try {
-          const sftp = await conn.getClient();
-          const action = await compare.decideBeforeOverwrite(sftp, doc.uri.fsPath, remote);
-          if (action !== 'upload') return;
-        } catch {
-          /* fall through */
+      const meta = openRemoteFiles.get(doc.uri.fsPath);
+      if (!meta) return;
+      const { remotePath, baseHash } = meta;
+      const auto = vscode.workspace.getConfiguration('quicksync').get('autoUpload', false);
+      const name = POSIX.basename(remotePath);
+
+      let proceed = true;
+      let c = null;
+      try {
+        const sftp = await conn.getClient();
+        c = await compare.gather(sftp, doc.uri.fsPath, remotePath);
+        if (c.exists) {
+          if (c.localHash === c.remoteHash) {
+            vscode.window.showInformationMessage(`QuickSync: ${name} is already up to date on the server.`);
+            meta.baseHash = c.localHash;
+            return;
+          }
+          const remoteChanged = baseHash && c.remoteHash !== baseHash;
+          if (remoteChanged) {
+            // True conflict: the server's copy changed under us.
+            const pick = await vscode.window.showWarningMessage(
+              `⚠ ${name} changed on the server since you opened it. Overwriting will discard the server's version.`,
+              { modal: true },
+              'Overwrite',
+              'View Diff',
+              'Cancel'
+            );
+            if (pick === 'View Diff') {
+              await compare.openDiff(doc.uri.fsPath, c.remoteTmp);
+              proceed =
+                (await vscode.window.showWarningMessage(
+                  'Overwrite the server version with your local changes?',
+                  { modal: true },
+                  'Overwrite'
+                )) === 'Overwrite';
+            } else {
+              proceed = pick === 'Overwrite';
+            }
+          } else if (!auto) {
+            proceed = await confirm(`Upload changes to ${remotePath}?`, 'Upload');
+          }
+        } else if (!auto) {
+          proceed = await confirm(`Remote ${remotePath} no longer exists. Create it?`, 'Upload');
         }
+      } catch {
+        // Conflict check failed (e.g. offline) — fall back to a simple confirm.
+        if (!auto) proceed = await confirm(`Upload changes to ${remotePath}?`, 'Upload');
       }
+      if (!proceed) return;
+
+      // After this upload the remote will equal our local content.
+      meta.baseHash = c && c.localHash ? c.localHash : fileSha256(doc.uri.fsPath);
       if (queue) {
-        queue.enqueue(doc.uri.fsPath, remote, POSIX.basename(remote));
+        queue.enqueue(doc.uri.fsPath, remotePath, name);
         return;
       }
       try {
         const sftp = await conn.getClient();
-        await sftp.fastPut(doc.uri.fsPath, remote);
-        vscode.window.showInformationMessage(`QuickSync: uploaded ${POSIX.basename(remote)} ✓`);
+        await sftp.fastPut(doc.uri.fsPath, remotePath);
+        vscode.window.showInformationMessage(`QuickSync: uploaded ${name} ✓`);
       } catch {
-        vscode.window.showErrorMessage(`QuickSync: failed to upload ${remote}.`);
+        vscode.window.showErrorMessage(`QuickSync: failed to upload ${remotePath}.`);
+      }
+    })
+  );
+
+  // Clean up the temp file (and tracking) when a remote-opened doc is closed.
+  context.subscriptions.push(
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      const meta = openRemoteFiles.get(doc.uri.fsPath);
+      if (!meta) return;
+      openRemoteFiles.delete(doc.uri.fsPath);
+      try {
+        fs.rmSync(path.dirname(doc.uri.fsPath), { recursive: true, force: true });
+      } catch {
+        /* best effort */
       }
     })
   );
