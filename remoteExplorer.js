@@ -178,6 +178,7 @@ const openRemoteFiles = new Map();
 function registerRemoteExplorer(context, deps, conn, queue) {
   if (!conn) conn = new ConnectionManager(deps);
   if (!conn.deps) conn.deps = deps;
+  const audit = (deps && deps.audit) || { log() {} };
   const provider = new RemoteTreeProvider(conn);
   const view = vscode.window.createTreeView('quicksyncRemote', {
     treeDataProvider: provider,
@@ -194,15 +195,22 @@ function registerRemoteExplorer(context, deps, conn, queue) {
       vscode.window.showWarningMessage('QuickSync is disabled in untrusted workspaces.');
       return;
     }
-    try {
-      conn.deps._lastError = null;
-      await conn.getClient();
-      provider.refresh();
-    } catch (err) {
-      conn.deps._lastError = 'Connect failed — check config / fingerprint';
-      vscode.window.showErrorMessage(`QuickSync: ${err.message}`);
-      provider.refresh();
-    }
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'QuickSync: connecting…' },
+      async () => {
+        try {
+          conn.deps._lastError = null;
+          await conn.getClient();
+          provider.refresh();
+          const c = conn.cfg || {};
+          vscode.window.showInformationMessage(`QuickSync: connected to ${c.username || ''}@${c.host || 'server'} ✓`);
+        } catch (err) {
+          conn.deps._lastError = 'Connect failed — check config / fingerprint';
+          vscode.window.showErrorMessage(`QuickSync: connection failed — ${err.message}`);
+          provider.refresh();
+        }
+      }
+    );
   });
 
   reg('quicksync.remote.disconnect', async () => {
@@ -335,6 +343,7 @@ function registerRemoteExplorer(context, deps, conn, queue) {
           } else {
             await sftp.fastGet(item.remotePath, path.join(target, item.entry.name));
           }
+          audit.log('download', { remotePath: item.remotePath, result: 'ok' });
           vscode.window.showInformationMessage(`QuickSync: downloaded ${item.entry.name} ✓`);
         } catch {
           vscode.window.showErrorMessage(`QuickSync: download of ${item.entry.name} failed.`);
@@ -407,7 +416,9 @@ function registerRemoteExplorer(context, deps, conn, queue) {
     if (!name || name === item.entry.name || /[\\/]/.test(name) || name === '..') return;
     try {
       const sftp = await conn.getClient();
-      await sftp.rename(item.remotePath, POSIX.join(POSIX.dirname(item.remotePath), name));
+      const to = POSIX.join(POSIX.dirname(item.remotePath), name);
+      await sftp.rename(item.remotePath, to);
+      audit.log('rename', { from: item.remotePath, to });
       provider.refresh();
     } catch {
       vscode.window.showErrorMessage('QuickSync: rename failed.');
@@ -426,11 +437,50 @@ function registerRemoteExplorer(context, deps, conn, queue) {
       try {
         if (t.isDir) await sftp.rmdir(t.remotePath, true);
         else await sftp.delete(t.remotePath);
+        audit.log('delete', { remotePath: t.remotePath, result: 'ok' });
       } catch {
         vscode.window.showErrorMessage(`QuickSync: could not delete ${t.entry.name}.`);
       }
     }
     provider.refresh();
+  });
+
+  // Restore a remote file from its most recent .quicksync-backups copy.
+  reg('quicksync.remote.restore', async (item) => {
+    if (!item || item.isDir) return;
+    const dir = POSIX.dirname(item.remotePath);
+    const base = POSIX.basename(item.remotePath);
+    const bdir = POSIX.join(dir, '.quicksync-backups');
+    try {
+      const sftp = await conn.getClient();
+      if (!(await sftp.exists(bdir))) {
+        vscode.window.showInformationMessage('QuickSync: no backups for this file.');
+        return;
+      }
+      const backups = (await sftp.list(bdir))
+        .filter((e) => e.type === '-' && e.name.startsWith(base + '.'))
+        .sort((a, b) => b.name.localeCompare(a.name)); // newest (timestamp) first
+      if (backups.length === 0) {
+        vscode.window.showInformationMessage('QuickSync: no backups for this file.');
+        return;
+      }
+      const pick = await vscode.window.showQuickPick(
+        backups.map((b) => ({ label: b.name.slice(base.length + 1), description: formatSize(b.size), name: b.name })),
+        { placeHolder: `Restore which backup of ${base}?` }
+      );
+      if (!pick) return;
+      const confirmRestore = await confirm(`Overwrite ${item.remotePath} with backup from ${pick.label}?`, 'Restore');
+      if (!confirmRestore) return;
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'quicksync-rst-'));
+      const local = path.join(tmpDir, base);
+      await sftp.fastGet(POSIX.join(bdir, pick.name), local);
+      await sftp.fastPut(local, item.remotePath);
+      audit.log('restore', { remotePath: item.remotePath, from: pick.name, result: 'ok' });
+      vscode.window.showInformationMessage(`QuickSync: restored ${base} from backup.`);
+      provider.refresh();
+    } catch (err) {
+      vscode.window.showErrorMessage(`QuickSync: restore failed (${err.message}).`);
+    }
   });
 
   // Clean up temp files on shutdown.

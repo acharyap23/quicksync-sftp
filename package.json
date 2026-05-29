@@ -184,7 +184,18 @@
         "title": "Open Dual-Pane Explorer",
         "category": "QuickSync",
         "icon": "$(split-horizontal)"
-      }
+      },
+      { "command": "quicksync.sites.new", "title": "New Site", "category": "QuickSync", "icon": "$(add)" },
+      { "command": "quicksync.sites.edit", "title": "Edit Site", "category": "QuickSync", "icon": "$(edit)" },
+      { "command": "quicksync.sites.duplicate", "title": "Duplicate Site", "category": "QuickSync", "icon": "$(copy)" },
+      { "command": "quicksync.sites.delete", "title": "Delete Site", "category": "QuickSync", "icon": "$(trash)" },
+      { "command": "quicksync.sites.connect", "title": "Connect", "category": "QuickSync", "icon": "$(plug)" },
+      { "command": "quicksync.sites.disconnect", "title": "Disconnect", "category": "QuickSync", "icon": "$(debug-disconnect)" },
+      { "command": "quicksync.sites.test", "title": "Test Connection", "category": "QuickSync", "icon": "$(beaker)" },
+      { "command": "quicksync.sites.quickConnect", "title": "Quick Connect…", "category": "QuickSync", "icon": "$(zap)" },
+      { "command": "quicksync.sites.fromSshConfig", "title": "Import from SSH config", "category": "QuickSync", "icon": "$(key)" },
+      { "command": "quicksync.remote.restore", "title": "Restore from Backup", "category": "QuickSync", "icon": "$(history)" },
+      { "command": "quicksync.openAuditLog", "title": "Open Audit Log", "category": "QuickSync" }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -197,6 +208,11 @@
     },
     "views": {
       "quicksync": [
+        {
+          "id": "quicksyncSites",
+          "name": "Site Manager",
+          "contextualTitle": "QuickSync Sites"
+        },
         {
           "id": "quicksyncRemote",
           "name": "Remote",
@@ -220,6 +236,10 @@
         { "command": "quicksync.compareWithRemote", "when": "resourceScheme == file && !explorerResourceIsFolder", "group": "7_quicksync@2" }
       ],
       "view/title": [
+        { "command": "quicksync.sites.new", "when": "view == quicksyncSites", "group": "navigation@1" },
+        { "command": "quicksync.sites.quickConnect", "when": "view == quicksyncSites", "group": "navigation@2" },
+        { "command": "quicksync.sites.fromSshConfig", "when": "view == quicksyncSites", "group": "navigation@3" },
+        { "command": "quicksync.sites.disconnect", "when": "view == quicksyncSites", "group": "1_conn" },
         { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote", "group": "navigation@1" },
         { "command": "quicksync.remote.refresh", "when": "view == quicksyncRemote", "group": "navigation@2" },
         { "command": "quicksync.remote.newFolder", "when": "view == quicksyncRemote", "group": "navigation@3" },
@@ -229,6 +249,11 @@
         { "command": "quicksync.queue.clear", "when": "view == quicksyncQueue", "group": "navigation@2" }
       ],
       "view/item/context": [
+        { "command": "quicksync.sites.connect", "when": "view == quicksyncSites && viewItem =~ /quicksyncSite/", "group": "inline@1" },
+        { "command": "quicksync.sites.test", "when": "view == quicksyncSites && viewItem =~ /quicksyncSite/", "group": "1_conn@1" },
+        { "command": "quicksync.sites.edit", "when": "view == quicksyncSites && viewItem =~ /quicksyncSite/", "group": "2_edit@1" },
+        { "command": "quicksync.sites.duplicate", "when": "view == quicksyncSites && viewItem =~ /quicksyncSite/", "group": "2_edit@2" },
+        { "command": "quicksync.sites.delete", "when": "view == quicksyncSites && viewItem =~ /quicksyncSite/", "group": "3_danger@1" },
         { "command": "quicksync.queue.cancel", "when": "view == quicksyncQueue && viewItem =~ /qitem-(queued|uploading)/", "group": "inline" },
         { "command": "quicksync.queue.retry", "when": "view == quicksyncQueue && viewItem =~ /qitem-(failed|cancelled)/", "group": "inline" },
         { "command": "quicksync.remote.download", "when": "view == quicksyncRemote && viewItem =~ /quicksync(File|Dir)/", "group": "1_transfer@1" },
@@ -236,7 +261,8 @@
         { "command": "quicksync.remote.newFile", "when": "view == quicksyncRemote && viewItem == quicksyncDir", "group": "2_create@1" },
         { "command": "quicksync.remote.newFolder", "when": "view == quicksyncRemote && viewItem == quicksyncDir", "group": "2_create@2" },
         { "command": "quicksync.remote.rename", "when": "view == quicksyncRemote && viewItem =~ /quicksync(File|Dir)/", "group": "3_modify@1" },
-        { "command": "quicksync.remote.delete", "when": "view == quicksyncRemote && viewItem =~ /quicksync(File|Dir)/", "group": "3_modify@2" }
+        { "command": "quicksync.remote.delete", "when": "view == quicksyncRemote && viewItem =~ /quicksync(File|Dir)/", "group": "3_modify@2" },
+        { "command": "quicksync.remote.restore", "when": "view == quicksyncRemote && viewItem == quicksyncFile", "group": "3_modify@3" }
       ]
     },
     "configuration": {
@@ -286,6 +312,21 @@
           "type": "boolean",
           "default": false,
           "description": "Before overwriting a remote file on single-file sync, compare size/mtime/SHA-256 and offer Upload/Keep/View Diff. Always on in enterprise mode."
+        },
+        "quicksync.autoConnectLastSite": {
+          "type": "boolean",
+          "default": false,
+          "description": "On startup, automatically connect to the last active Site Manager site (trusted workspaces only)."
+        },
+        "quicksync.backupBeforeOverwrite": {
+          "type": "boolean",
+          "default": false,
+          "description": "Before overwriting a remote file, move the existing version into a .quicksync-backups folder (enables Restore). Always on in enterprise mode."
+        },
+        "quicksync.auditLog": {
+          "type": "boolean",
+          "default": false,
+          "description": "Append a local, redacted audit log of connect/upload/download/delete/rename/backup/restore actions (no secrets). Always on in enterprise mode."
         }
       }
     },

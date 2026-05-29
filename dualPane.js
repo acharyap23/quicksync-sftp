@@ -109,7 +109,22 @@ function registerDualPane(context, deps) {
   async function sendLocal(dir) {
     const root = deps.getWorkspaceRoot();
     if (!root) return logToView('No workspace folder open.');
-    let target = dir ? path.resolve(dir) : root;
+    let target;
+    if (dir) {
+      target = path.resolve(dir);
+    } else {
+      // Default to the active site's local dir if it's inside the workspace.
+      target = root;
+      try {
+        const cfg = await deps.loadConfig();
+        if (cfg && cfg.localDir) {
+          const p = path.resolve(cfg.localDir);
+          if (localInside(root, p)) target = p;
+        }
+      } catch {
+        /* fall back to root */
+      }
+    }
     if (!localInside(root, target)) target = root; // clamp to workspace
     try {
       const entries = fs.readdirSync(target, { withFileTypes: true })
