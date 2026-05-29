@@ -1,0 +1,5 @@
+# Normalize all text files to LF in the repository.
+* text=auto eol=lf
+
+# Treat the packaged extension and binaries as binary (never normalized).
+*.vsix binary
