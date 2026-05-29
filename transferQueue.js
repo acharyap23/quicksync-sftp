@@ -9,6 +9,8 @@
 // — resurrecting uploads after a reload would be surprising and unsafe.
 
 const vscode = require('vscode');
+const path = require('path');
+const POSIX = path.posix;
 
 const STATE = {
   QUEUED: 'Queued',
@@ -44,12 +46,13 @@ class TransferItem {
 }
 
 class TransferQueue {
-  constructor(conn, onChange) {
+  constructor(conn, onChange, audit) {
     this.conn = conn;
     this.items = [];
     this.active = 0;
     this.seq = 0;
     this.onChange = onChange || (() => {});
+    this.audit = audit || { log() {} };
   }
 
   get concurrency() {
@@ -121,6 +124,25 @@ class TransferQueue {
     const tmp = item.remotePath + '.qs-tmp';
     try {
       const sftp = await this.conn.getClient();
+
+      // Rollback support: back up an existing remote file before overwriting it.
+      const conf = vscode.workspace.getConfiguration('quicksync');
+      if (conf.get('backupBeforeOverwrite', false) || conf.get('enterpriseMode', false)) {
+        try {
+          if (await sftp.exists(item.remotePath)) {
+            const dir = POSIX.dirname(item.remotePath);
+            const bdir = POSIX.join(dir, '.quicksync-backups');
+            if (!(await sftp.exists(bdir))) await sftp.mkdir(bdir, true);
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const backup = POSIX.join(bdir, POSIX.basename(item.remotePath) + '.' + stamp);
+            await sftp.rename(item.remotePath, backup); // original preserved as backup
+            this.audit.log('backup', { remotePath: item.remotePath, to: backup });
+          }
+        } catch {
+          /* non-fatal: proceed without a backup rather than block the upload */
+        }
+      }
+
       await sftp.fastPut(item.localFull, tmp, {
         step: (transferred, _chunk, total) => {
           item.transferred = transferred;
@@ -153,10 +175,12 @@ class TransferQueue {
       } else {
         item.state = STATE.COMPLETED;
         item.transferred = item.total || item.transferred;
+        this.audit.log('upload', { remotePath: item.remotePath, bytes: item.total, result: 'ok' });
       }
     } catch (err) {
       item.state = STATE.FAILED;
       item.error = err && err.message ? err.message : 'upload failed';
+      this.audit.log('upload', { remotePath: item.remotePath, result: 'failed' });
       // Clean up any partial temp file.
       try {
         const sftp = await this.conn.getClient();
@@ -242,8 +266,9 @@ class QueueTreeProvider {
   }
 }
 
-function registerTransferQueue(context) {
+function registerTransferQueue(context, deps) {
   let conn = null;
+  const audit = (deps && deps.audit) || { log() {} };
   // Throttle refreshes — `step` fires very frequently.
   let provider;
   let pending = false;
@@ -256,7 +281,7 @@ function registerTransferQueue(context) {
     }, 250);
   };
 
-  const queue = new TransferQueue({ getClient: () => conn.getClient(), get cfg() { return conn && conn.cfg; } }, onChange);
+  const queue = new TransferQueue({ getClient: () => conn.getClient(), get cfg() { return conn && conn.cfg; } }, onChange, audit);
   provider = new QueueTreeProvider(queue);
 
   const view = vscode.window.createTreeView('quicksyncQueue', { treeDataProvider: provider });

@@ -234,10 +234,12 @@ async function promptSite(ctx, store, existing) {
 // ---------- Manager / registration ----------
 
 function registerSiteManager(context, deps) {
-  // deps: { connection, connectSftp, onActiveChanged }
+  // deps: { connection, connectSftp, onActiveChanged, audit }
   const store = new SiteStore(context);
+  const audit = (deps && deps.audit) || { log() {} };
   const mgr = {
     store,
+    ephemeral: null, // quick-connect config that isn't persisted
     connectedSiteId: null,
     connectedAt: 0,
     durationText() {
@@ -248,7 +250,7 @@ function registerSiteManager(context, deps) {
       return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${m % 60}m`;
     },
     getActiveConfig() {
-      return siteToConfig(store.getActive());
+      return this.ephemeral || siteToConfig(store.getActive());
     },
   };
 
@@ -304,6 +306,7 @@ function registerSiteManager(context, deps) {
       return;
     }
     await deps.connection.disconnect(); // drop any prior site's connection
+    mgr.ephemeral = null;
     await store.setActive(site.id);
     if (deps.onActiveChanged) deps.onActiveChanged();
     try {
@@ -312,6 +315,7 @@ function registerSiteManager(context, deps) {
       mgr.connectedAt = Date.now();
       provider.refresh();
       vscode.commands.executeCommand('quicksync.remote.refresh');
+      audit.log('connect', { site: site.siteName, host: site.host, user: site.username, protocol: site.protocol || 'sftp', result: 'ok' });
       vscode.window.showInformationMessage(`QuickSync: connected to ${site.siteName}.`);
     } catch (err) {
       mgr.connectedSiteId = null;
@@ -363,6 +367,59 @@ function registerSiteManager(context, deps) {
         }
       }
     );
+  });
+
+  // Quick Connect — connect without saving a site; optionally save afterward.
+  reg('quicksync.sites.quickConnect', async () => {
+    if (!vscode.workspace.isTrusted) {
+      vscode.window.showWarningMessage('QuickSync is disabled in untrusted workspaces.');
+      return;
+    }
+    const host = await vscode.window.showInputBox({ prompt: 'Host', ignoreFocusOut: true });
+    if (!host) return;
+    const portStr = await vscode.window.showInputBox({ prompt: 'Port', value: '22', ignoreFocusOut: true });
+    if (portStr === undefined) return;
+    const username = await vscode.window.showInputBox({ prompt: 'Username', ignoreFocusOut: true });
+    if (!username) return;
+    const remotePath = await vscode.window.showInputBox({
+      prompt: 'Remote root directory',
+      value: '/',
+      ignoreFocusOut: true,
+      validateInput: (v) => (v && v.startsWith('/') && !v.split('/').includes('..') ? null : 'Absolute path, no ".."'),
+    });
+    if (!remotePath) return;
+    const password = await vscode.window.showInputBox({ prompt: `Password for ${username}@${host}`, password: true, ignoreFocusOut: true });
+    if (password === undefined) return;
+    await context.secrets.store(siteSecretKey('quickconnect', 'password'), password);
+
+    await deps.connection.disconnect();
+    await store.setActive(null);
+    mgr.ephemeral = { _siteId: 'quickconnect', siteName: host, host, port: parseInt(portStr, 10) || 22, username, remotePath, protocol: 'sftp' };
+    if (deps.onActiveChanged) deps.onActiveChanged();
+    try {
+      await deps.connection.getClient();
+      mgr.connectedSiteId = 'quickconnect';
+      mgr.connectedAt = Date.now();
+      provider.refresh();
+      vscode.commands.executeCommand('quicksync.remote.refresh');
+      audit.log('connect', { site: 'quick-connect', host, user: username, protocol: 'sftp', result: 'ok' });
+      const save = await vscode.window.showInformationMessage(`Connected to ${host}. Save as a site?`, 'Save Site');
+      if (save === 'Save Site') {
+        const site = { id: newId(), siteName: host, folder: '', host, port: parseInt(portStr, 10) || 22, protocol: 'sftp', username, remotePath };
+        await store.save(site);
+        const pw = await context.secrets.get(siteSecretKey('quickconnect', 'password'));
+        if (pw) await context.secrets.store(siteSecretKey(site.id, 'password'), pw);
+        mgr.ephemeral = null;
+        mgr.connectedSiteId = site.id;
+        await store.setActive(site.id);
+        provider.refresh();
+      }
+    } catch (err) {
+      mgr.ephemeral = null;
+      mgr.connectedSiteId = null;
+      provider.refresh();
+      vscode.window.showErrorMessage(`QuickSync: quick connect failed (${err.message}).`);
+    }
   });
 
   // Auto-connect last active site on startup (opt-in).

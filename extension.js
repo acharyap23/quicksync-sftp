@@ -13,6 +13,8 @@ let transferQueue = null;       // Phase 3: shared upload queue
 let connection = null;          // Phase 1/3: shared ConnectionManager
 const compare = require('./compare'); // Phase 4
 const safety = require('./safety'); // Phase 7
+const { AuditLogger } = require('./audit');
+let auditLogger = null;
 
 // ---------- Secret deny-list (H-1: non-overridable) ----------
 // These are ALWAYS skipped regardless of the user's ignore list. A
@@ -1040,18 +1042,22 @@ function activate(context) {
   // Phases 1+3: native remote explorer + transfer queue, sharing one connection.
   const { registerRemoteExplorer, ConnectionManager } = require('./remoteExplorer');
   const { registerTransferQueue } = require('./transferQueue');
+  auditLogger = new AuditLogger(context);
+  context.subscriptions.push(vscode.commands.registerCommand('quicksync.openAuditLog', () => auditLogger.open()));
+
   // The connection resolves its target via resolveConfig (active site → legacy file).
   const conn = new ConnectionManager({ loadConfig: resolveConfig, connectSftp });
   connection = conn;
-  transferQueue = registerTransferQueue(context);
+  transferQueue = registerTransferQueue(context, { audit: auditLogger });
   transferQueue.bindConnection(conn);
-  registerRemoteExplorer(context, { loadConfig: resolveConfig, connectSftp }, conn, transferQueue);
+  registerRemoteExplorer(context, { loadConfig: resolveConfig, connectSftp, audit: auditLogger }, conn, transferQueue);
 
   // Site Manager — multi-site profiles driving the shared connection.
   const sitesMod = require('./sites');
   siteManager = sitesMod.registerSiteManager(context, {
     connection: conn,
     connectSftp,
+    audit: auditLogger,
     onActiveChanged: () => vscode.commands.executeCommand('quicksync.remote.refresh'),
   });
 
