@@ -10,6 +10,8 @@ let lastSyncTime = 0;
 let isSyncing = false;          // M-2: single-flight lock
 let extContext = null;          // for SecretStorage + globalState
 let transferQueue = null;       // Phase 3: shared upload queue
+let connection = null;          // Phase 1/3: shared ConnectionManager
+const compare = require('./compare'); // Phase 4
 
 // ---------- Secret deny-list (H-1: non-overridable) ----------
 // These are ALWAYS skipped regardless of the user's ignore list. A
@@ -593,6 +595,47 @@ function requireTrust() {
   return true;
 }
 
+// Map a local absolute path to its remote path under cfg.remotePath. Returns
+// null if the file is outside the workspace.
+function localToRemote(cfg, root, full) {
+  const rel = path.relative(root, full);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  const base = cfg.remotePath.replace(/\\/g, '/').replace(/\/$/, '');
+  return base + '/' + rel.split(path.sep).join('/');
+}
+
+// Compare pre-flight is on when explicitly enabled or in enterprise mode.
+function compareBeforeOverwriteEnabled() {
+  const c = vscode.workspace.getConfiguration('quicksync');
+  return c.get('compareBeforeOverwrite', false) || c.get('enterpriseMode', false);
+}
+
+async function compareWithRemoteCommand(uri) {
+  if (!requireTrust()) return;
+  const target = uri || (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.uri);
+  if (!target) {
+    vscode.window.showInformationMessage('QuickSync: no file to compare.');
+    return;
+  }
+  const cfg = await loadConfig();
+  if (!cfg) {
+    vscode.window.showWarningMessage('QuickSync: no config found.');
+    return;
+  }
+  const root = getWorkspaceRoot();
+  const remotePath = localToRemote(cfg, root, target.fsPath);
+  if (!remotePath) {
+    vscode.window.showWarningMessage('QuickSync: file is outside the workspace.');
+    return;
+  }
+  try {
+    const sftp = await connection.getClient();
+    await compare.compareWithRemote(sftp, target.fsPath, remotePath);
+  } catch (err) {
+    vscode.window.showErrorMessage(`QuickSync: compare failed (${err.message}).`);
+  }
+}
+
 // Push entries onto the shared transfer queue (Phase 3). Remote paths mirror
 // the workspace layout under cfg.remotePath.
 function enqueueEntries(cfg, files) {
@@ -667,6 +710,17 @@ async function syncCurrentFile() {
   await ed.document.save();
   const root = getWorkspaceRoot();
   const files = await collectEntries([ed.document.uri], root, cfg);
+  // Phase 4: compare/confirm before overwriting a differing remote file.
+  if (files.length === 1 && compareBeforeOverwriteEnabled() && connection) {
+    try {
+      const remotePath = localToRemote(cfg, root, files[0].full);
+      const sftp = await connection.getClient();
+      const action = await compare.decideBeforeOverwrite(sftp, files[0].full, remotePath);
+      if (action !== 'upload') return;
+    } catch {
+      /* compare failed — fall through to normal upload */
+    }
+  }
   enqueueEntries(cfg, files);
 }
 
@@ -816,7 +870,9 @@ function activate(context) {
       syncUris(uris && uris.length ? uris : uri ? [uri] : [])
     ),
     vscode.commands.registerCommand('quicksync.syncFolder', (uri) => syncUris(uri ? [uri] : [])),
-    vscode.commands.registerCommand('quicksync.syncWorkspace', () => runSync(false))
+    vscode.commands.registerCommand('quicksync.syncWorkspace', () => runSync(false)),
+    // Phase 4: compare
+    vscode.commands.registerCommand('quicksync.compareWithRemote', (uri) => compareWithRemoteCommand(uri))
   );
 
   // Phases 1+3: native remote explorer + transfer queue, sharing one connection.
@@ -824,6 +880,7 @@ function activate(context) {
   const { registerTransferQueue } = require('./transferQueue');
   const deps = { loadConfig, connectSftp };
   const conn = new ConnectionManager(deps);
+  connection = conn;
   transferQueue = registerTransferQueue(context);
   transferQueue.bindConnection(conn);
   registerRemoteExplorer(context, deps, conn, transferQueue);

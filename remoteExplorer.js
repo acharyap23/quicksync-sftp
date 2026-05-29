@@ -11,6 +11,7 @@ const vscode = require('vscode');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const compare = require('./compare');
 
 const POSIX = path.posix;
 
@@ -228,8 +229,19 @@ function registerRemoteExplorer(context, deps, conn, queue) {
     vscode.workspace.onDidSaveTextDocument(async (doc) => {
       const remote = openRemoteFiles.get(doc.uri.fsPath);
       if (!remote) return;
-      const auto = vscode.workspace.getConfiguration('quicksync').get('autoUpload', false);
+      const conf = vscode.workspace.getConfiguration('quicksync');
+      const auto = conf.get('autoUpload', false);
       if (!auto && !(await confirm(`Upload changes to ${remote}?`, 'Upload'))) return;
+      // Phase 4: optional conflict check — the remote may have changed since open.
+      if (conf.get('compareBeforeOverwrite', false) || conf.get('enterpriseMode', false)) {
+        try {
+          const sftp = await conn.getClient();
+          const action = await compare.decideBeforeOverwrite(sftp, doc.uri.fsPath, remote);
+          if (action !== 'upload') return;
+        } catch {
+          /* fall through */
+        }
+      }
       if (queue) {
         queue.enqueue(doc.uri.fsPath, remote, POSIX.basename(remote));
         return;

@@ -167,6 +167,12 @@
         "title": "Retry All Failed",
         "category": "QuickSync",
         "icon": "$(debug-restart)"
+      },
+      {
+        "command": "quicksync.compareWithRemote",
+        "title": "Compare with Remote",
+        "category": "QuickSync",
+        "icon": "$(git-compare)"
       }
     ],
     "viewsContainers": {
@@ -194,11 +200,13 @@
     },
     "menus": {
       "editor/title": [
-        { "command": "quicksync.syncCurrentFile", "when": "resourceScheme == file", "group": "navigation" }
+        { "command": "quicksync.syncCurrentFile", "when": "resourceScheme == file", "group": "navigation@1" },
+        { "command": "quicksync.compareWithRemote", "when": "resourceScheme == file", "group": "navigation@2" }
       ],
       "explorer/context": [
         { "command": "quicksync.syncSelectedFiles", "when": "resourceScheme == file && !explorerResourceIsFolder", "group": "7_quicksync@1" },
-        { "command": "quicksync.syncFolder", "when": "explorerResourceIsFolder", "group": "7_quicksync@1" }
+        { "command": "quicksync.syncFolder", "when": "explorerResourceIsFolder", "group": "7_quicksync@1" },
+        { "command": "quicksync.compareWithRemote", "when": "resourceScheme == file && !explorerResourceIsFolder", "group": "7_quicksync@2" }
       ],
       "view/title": [
         { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote", "group": "navigation@1" },
@@ -243,6 +251,11 @@
           "minimum": 1,
           "maximum": 8,
           "description": "Number of files to upload at once via the transfer queue (1 = sequential)."
+        },
+        "quicksync.compareBeforeOverwrite": {
+          "type": "boolean",
+          "default": false,
+          "description": "Before overwriting a remote file on single-file sync, compare size/mtime/SHA-256 and offer Upload/Keep/View Diff. Always on in enterprise mode."
         }
       }
     },
