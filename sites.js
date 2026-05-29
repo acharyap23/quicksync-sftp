@@ -9,6 +9,7 @@ const vscode = require('vscode');
 const path = require('path');
 const os = require('os');
 const { openSiteEditor } = require('./siteEditor');
+const sshConfig = require('./sshConfig');
 
 const STORE_KEY = 'quicksync.sites.v1';
 const ACTIVE_KEY = 'quicksync.activeSite';
@@ -196,6 +197,35 @@ function registerSiteManager(context, deps) {
   reg('quicksync.sites.new', () => openEditor(null));
   reg('quicksync.sites.edit', (item) => item && item.site && openEditor(item.site));
 
+  // Import a host from ~/.ssh/config and pre-fill the editor.
+  reg('quicksync.sites.fromSshConfig', async () => {
+    const hosts = sshConfig.parse();
+    if (hosts.length === 0) {
+      vscode.window.showInformationMessage(`QuickSync: no usable Host entries found in ${sshConfig.configPath()}.`);
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(
+      hosts.map((h) => ({
+        label: h.host,
+        description: `${h.user ? h.user + '@' : ''}${h.hostName || h.host}${h.port ? ':' + h.port : ''}`,
+        h,
+      })),
+      { placeHolder: 'Import which SSH host? (you can edit before saving)' }
+    );
+    if (!pick) return;
+    const h = pick.h;
+    // Pre-fill a NEW site (no id) — user confirms the remote root, then Save/Connect.
+    openEditor({
+      siteName: h.host,
+      host: h.hostName || h.host,
+      port: parseInt(h.port, 10) || 22,
+      username: h.user || '',
+      privateKeyPath: h.identityFile || '~/.ssh/id_rsa',
+      remotePath: '/',
+      folder: '',
+    });
+  });
+
   reg('quicksync.sites.duplicate', async (item) => {
     if (!item || !item.site) return;
     await store.duplicate(item.site.id);
@@ -231,11 +261,12 @@ function registerSiteManager(context, deps) {
       provider.refresh();
       vscode.commands.executeCommand('quicksync.remote.refresh');
       audit.log('connect', { site: site.siteName, host: site.host, user: site.username, protocol: site.protocol || 'sftp', result: 'ok' });
-      vscode.window.showInformationMessage(`QuickSync: connected to ${site.siteName}.`);
+      vscode.window.showInformationMessage(`QuickSync: connected to ${site.siteName} (${site.username}@${site.host}:${site.port || 22}) ✓`);
     } catch (err) {
       mgr.connectedSiteId = null;
       provider.refresh();
-      vscode.window.showErrorMessage(`QuickSync: connection to ${site.siteName} failed (${err.message}).`);
+      audit.log('connect', { site: site.siteName, host: site.host, user: site.username, result: 'failed' });
+      vscode.window.showErrorMessage(`QuickSync: connection to ${site.siteName} failed — ${err.message}`);
     }
   }
 

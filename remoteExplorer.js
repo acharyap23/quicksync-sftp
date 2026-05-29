@@ -195,15 +195,22 @@ function registerRemoteExplorer(context, deps, conn, queue) {
       vscode.window.showWarningMessage('QuickSync is disabled in untrusted workspaces.');
       return;
     }
-    try {
-      conn.deps._lastError = null;
-      await conn.getClient();
-      provider.refresh();
-    } catch (err) {
-      conn.deps._lastError = 'Connect failed — check config / fingerprint';
-      vscode.window.showErrorMessage(`QuickSync: ${err.message}`);
-      provider.refresh();
-    }
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'QuickSync: connecting…' },
+      async () => {
+        try {
+          conn.deps._lastError = null;
+          await conn.getClient();
+          provider.refresh();
+          const c = conn.cfg || {};
+          vscode.window.showInformationMessage(`QuickSync: connected to ${c.username || ''}@${c.host || 'server'} ✓`);
+        } catch (err) {
+          conn.deps._lastError = 'Connect failed — check config / fingerprint';
+          vscode.window.showErrorMessage(`QuickSync: connection failed — ${err.message}`);
+          provider.refresh();
+        }
+      }
+    );
   });
 
   reg('quicksync.remote.disconnect', async () => {

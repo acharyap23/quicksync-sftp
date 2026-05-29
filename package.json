@@ -193,6 +193,7 @@
       { "command": "quicksync.sites.disconnect", "title": "Disconnect", "category": "QuickSync", "icon": "$(debug-disconnect)" },
       { "command": "quicksync.sites.test", "title": "Test Connection", "category": "QuickSync", "icon": "$(beaker)" },
       { "command": "quicksync.sites.quickConnect", "title": "Quick Connect…", "category": "QuickSync", "icon": "$(zap)" },
+      { "command": "quicksync.sites.fromSshConfig", "title": "Import from SSH config", "category": "QuickSync", "icon": "$(key)" },
       { "command": "quicksync.remote.restore", "title": "Restore from Backup", "category": "QuickSync", "icon": "$(history)" },
       { "command": "quicksync.openAuditLog", "title": "Open Audit Log", "category": "QuickSync" }
     ],
@@ -237,6 +238,7 @@
       "view/title": [
         { "command": "quicksync.sites.new", "when": "view == quicksyncSites", "group": "navigation@1" },
         { "command": "quicksync.sites.quickConnect", "when": "view == quicksyncSites", "group": "navigation@2" },
+        { "command": "quicksync.sites.fromSshConfig", "when": "view == quicksyncSites", "group": "navigation@3" },
         { "command": "quicksync.sites.disconnect", "when": "view == quicksyncSites", "group": "1_conn" },
         { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote", "group": "navigation@1" },
         { "command": "quicksync.remote.refresh", "when": "view == quicksyncRemote", "group": "navigation@2" },

@@ -8,6 +8,7 @@ safety.js
 dualPane.js
 sites.js
 siteEditor.js
+sshConfig.js
 audit.js
 esbuild.js
 .vscode/**
