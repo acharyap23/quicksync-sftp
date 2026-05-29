@@ -56,7 +56,9 @@ class TransferQueue {
   }
 
   get concurrency() {
-    const n = vscode.workspace.getConfiguration('quicksync').get('concurrentTransfers', 1);
+    // A per-site "max simultaneous connections" overrides the global setting.
+    const perSite = this.conn && this.conn.cfg && this.conn.cfg.maxConnections;
+    const n = perSite > 0 ? perSite : vscode.workspace.getConfiguration('quicksync').get('concurrentTransfers', 1);
     return Math.min(8, Math.max(1, Number(n) || 1));
   }
 

@@ -86,6 +86,8 @@ function siteToConfig(site) {
     remotePath: site.remotePath,
     hostFingerprint: site.hostFingerprint,
     protocol: site.protocol || 'sftp',
+    maxConnections: site.maxConnections || 0,
+    localDir: site.localDir || undefined,
   };
 }
 
