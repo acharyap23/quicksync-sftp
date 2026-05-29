@@ -238,7 +238,25 @@
         "quicksync.autoUpload": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically upload changes after saving a remote-opened file (off by default)."
+          "description": "Automatically upload changes after saving a file you opened FROM the remote (skips the per-save confirmation). Off by default."
+        },
+        "quicksync.autoSync": {
+          "type": "string",
+          "enum": ["off", "currentFile", "workspaceChanges"],
+          "enumDescriptions": [
+            "Disabled — upload only via manual commands.",
+            "On save, upload the saved file.",
+            "On save, upload all workspace files changed since the last sync."
+          ],
+          "default": "off",
+          "description": "Automatically upload local workspace files when you save them. Routed through the transfer queue; sensitive/ignored files are never auto-uploaded. Off by default."
+        },
+        "quicksync.autoSyncDebounce": {
+          "type": "integer",
+          "default": 1000,
+          "minimum": 200,
+          "maximum": 10000,
+          "description": "Milliseconds to wait after the last save before auto-sync uploads (debounce)."
         },
         "quicksync.enterpriseMode": {
           "type": "boolean",

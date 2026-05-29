@@ -638,9 +638,9 @@ async function compareWithRemoteCommand(uri) {
 
 // Push entries onto the shared transfer queue (Phase 3). Remote paths mirror
 // the workspace layout under cfg.remotePath.
-function enqueueEntries(cfg, files) {
+function enqueueEntries(cfg, files, quiet) {
   if (files.length === 0) {
-    vscode.window.showInformationMessage('QuickSync: nothing to upload.');
+    if (!quiet) vscode.window.showInformationMessage('QuickSync: nothing to upload.');
     return;
   }
   if (!transferQueue) {
@@ -652,7 +652,79 @@ function enqueueEntries(cfg, files) {
     const remoteRel = f.rel.split(path.sep).join('/');
     transferQueue.enqueue(f.full, base + '/' + remoteRel, f.rel);
   }
-  vscode.window.showInformationMessage(`QuickSync: queued ${files.length} file(s) — see the QuickSync ▸ Transfers view.`);
+  if (!quiet) {
+    vscode.window.showInformationMessage(
+      `QuickSync: queued ${files.length} file(s) — see the QuickSync ▸ Transfers view.`
+    );
+  }
+}
+
+// ---------- Phase 6: auto-sync engine (off by default) ----------
+
+let autoSyncTimer = null;
+const autoSyncPending = new Set(); // local fsPaths saved since last flush
+let autoSyncBaseline = 0; // mtime watermark for "workspaceChanges" mode
+
+function autoSyncMode() {
+  return vscode.workspace.getConfiguration('quicksync').get('autoSync', 'off');
+}
+
+// Called on every text-document save. Cheap, debounced, and loop-safe.
+function scheduleAutoSync(doc) {
+  if (autoSyncMode() === 'off') return;
+  if (!vscode.workspace.isTrusted) return;
+  if (!doc || doc.uri.scheme !== 'file') return; // ignore untitled / non-file
+  const root = getWorkspaceRoot();
+  if (!root) return;
+  // Loop prevention: only act on files INSIDE the workspace. Remote-opened
+  // temp files live in the OS temp dir (outside root) and are handled
+  // separately, so they never re-trigger here. We never write into the
+  // workspace ourselves, so uploads can't cause a save→upload→save loop.
+  const rel = path.relative(root, doc.uri.fsPath);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return;
+  autoSyncPending.add(doc.uri.fsPath);
+  const delay = vscode.workspace.getConfiguration('quicksync').get('autoSyncDebounce', 1000);
+  if (autoSyncTimer) clearTimeout(autoSyncTimer);
+  autoSyncTimer = setTimeout(() => {
+    flushAutoSync().catch((err) => console.error('QuickSync auto-sync error:', err));
+  }, Math.max(200, Number(delay) || 1000));
+}
+
+async function flushAutoSync() {
+  autoSyncTimer = null;
+  const saved = [...autoSyncPending];
+  autoSyncPending.clear();
+  const mode = autoSyncMode();
+  if (mode === 'off') return;
+  if (!vscode.workspace.isTrusted) return;
+  const cfg = await loadConfig();
+  if (!cfg) return;
+  const root = getWorkspaceRoot();
+  if (!root) return;
+
+  let files = [];
+  if (mode === 'workspaceChanges') {
+    // Upload everything changed since the last flush (deny-list applied by walk).
+    const prev = autoSyncBaseline;
+    autoSyncBaseline = Date.now();
+    const all = await walk(root, root, cfg.ignore || []);
+    files = all.filter((f) => f.mtime > prev);
+  } else {
+    // "currentFile": just the saved file(s), deny-list filtered (silently).
+    for (const full of saved) {
+      const rel = path.relative(root, full);
+      if (rel.startsWith('..') || path.isAbsolute(rel)) continue;
+      if (shouldIgnore(rel, cfg.ignore)) continue; // never auto-push secrets
+      let st;
+      try {
+        st = fs.statSync(full);
+      } catch {
+        continue;
+      }
+      files.push({ full, rel, mtime: st.mtimeMs });
+    }
+  }
+  enqueueEntries(cfg, files, /* quiet */ true);
 }
 
 // Turn a set of URIs into upload entries: files become entries (skipping
@@ -884,6 +956,11 @@ function activate(context) {
   transferQueue = registerTransferQueue(context);
   transferQueue.bindConnection(conn);
   registerRemoteExplorer(context, deps, conn, transferQueue);
+
+  // Phase 6: auto-sync on save (off by default). Baseline starts now so the
+  // first save in "workspaceChanges" mode doesn't push the whole tree.
+  autoSyncBaseline = Date.now();
+  context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => scheduleAutoSync(doc)));
 
   const showBar = vscode.workspace.getConfiguration('quicksync').get('showStatusBar', true);
   if (showBar) {
