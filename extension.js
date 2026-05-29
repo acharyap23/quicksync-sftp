@@ -413,6 +413,15 @@ function isEncryptedKey(buf) {
 }
 
 async function connectSftp(cfg) {
+  // Tolerate a "user@host" value mistakenly placed in the host field
+  // (a common copy/paste from an `ssh user@host` command).
+  if (typeof cfg.host === 'string' && cfg.host.includes('@')) {
+    const at = cfg.host.lastIndexOf('@');
+    if (!cfg.username) cfg.username = cfg.host.slice(0, at);
+    cfg.host = cfg.host.slice(at + 1);
+  }
+  if (typeof cfg.host === 'string') cfg.host = cfg.host.trim();
+
   const sftp = new SftpClient();
   const connectOpts = {
     host: cfg.host,
