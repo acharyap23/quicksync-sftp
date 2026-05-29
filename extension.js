@@ -701,6 +701,10 @@ function activate(context) {
     vscode.commands.registerCommand('quicksync.clearCredentials', () => clearCredentials())
   );
 
+  // Phase 1: native remote explorer (reuses loadConfig/connectSftp for security).
+  const { registerRemoteExplorer } = require('./remoteExplorer');
+  registerRemoteExplorer(context, { loadConfig, connectSftp });
+
   const showBar = vscode.workspace.getConfiguration('quicksync').get('showStatusBar', true);
   if (showBar) {
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);

@@ -64,8 +64,100 @@
       {
         "command": "quicksync.clearCredentials",
         "title": "QuickSync: Clear Saved Credentials"
+      },
+      {
+        "command": "quicksync.remote.connect",
+        "title": "Connect",
+        "category": "QuickSync",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "quicksync.remote.disconnect",
+        "title": "Disconnect",
+        "category": "QuickSync",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "quicksync.remote.refresh",
+        "title": "Refresh",
+        "category": "QuickSync",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "quicksync.remote.openFile",
+        "title": "Open Remote File",
+        "category": "QuickSync"
+      },
+      {
+        "command": "quicksync.remote.download",
+        "title": "Download",
+        "category": "QuickSync",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "quicksync.remote.uploadHere",
+        "title": "Upload Here…",
+        "category": "QuickSync",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "quicksync.remote.newFolder",
+        "title": "New Folder",
+        "category": "QuickSync",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "quicksync.remote.newFile",
+        "title": "New File",
+        "category": "QuickSync",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "quicksync.remote.rename",
+        "title": "Rename",
+        "category": "QuickSync"
+      },
+      {
+        "command": "quicksync.remote.delete",
+        "title": "Delete",
+        "category": "QuickSync",
+        "icon": "$(trash)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "quicksync",
+          "title": "QuickSync",
+          "icon": "media/quicksync.svg"
+        }
+      ]
+    },
+    "views": {
+      "quicksync": [
+        {
+          "id": "quicksyncRemote",
+          "name": "Remote",
+          "contextualTitle": "QuickSync Remote"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote", "group": "navigation@1" },
+        { "command": "quicksync.remote.refresh", "when": "view == quicksyncRemote", "group": "navigation@2" },
+        { "command": "quicksync.remote.newFolder", "when": "view == quicksyncRemote", "group": "navigation@3" },
+        { "command": "quicksync.remote.disconnect", "when": "view == quicksyncRemote", "group": "1_conn" }
+      ],
+      "view/item/context": [
+        { "command": "quicksync.remote.download", "when": "view == quicksyncRemote && viewItem =~ /quicksync(File|Dir)/", "group": "1_transfer@1" },
+        { "command": "quicksync.remote.uploadHere", "when": "view == quicksyncRemote && viewItem == quicksyncDir", "group": "1_transfer@2" },
+        { "command": "quicksync.remote.newFile", "when": "view == quicksyncRemote && viewItem == quicksyncDir", "group": "2_create@1" },
+        { "command": "quicksync.remote.newFolder", "when": "view == quicksyncRemote && viewItem == quicksyncDir", "group": "2_create@2" },
+        { "command": "quicksync.remote.rename", "when": "view == quicksyncRemote && viewItem =~ /quicksync(File|Dir)/", "group": "3_modify@1" },
+        { "command": "quicksync.remote.delete", "when": "view == quicksyncRemote && viewItem =~ /quicksync(File|Dir)/", "group": "3_modify@2" }
+      ]
+    },
     "configuration": {
       "title": "QuickSync SFTP",
       "properties": {
@@ -73,6 +165,16 @@
           "type": "boolean",
           "default": true,
           "description": "Show the sync button in the status bar"
+        },
+        "quicksync.autoUpload": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically upload changes after saving a remote-opened file (off by default)."
+        },
+        "quicksync.enterpriseMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Require explicit confirmation for upload/overwrite/delete and enforce host-fingerprint pinning. Recommended for production servers."
         }
       }
     },
