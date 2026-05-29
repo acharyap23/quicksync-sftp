@@ -50,6 +50,7 @@ class SiteStore {
     // SecretStorage has no enumerate; delete known secret names.
     await this.ctx.secrets.delete(siteSecretKey(id, 'password'));
     await this.ctx.secrets.delete(siteSecretKey(id, 'passphrase'));
+    await this.ctx.secrets.delete(siteSecretKey(id, 'notes'));
     if (this.getActiveId() === id) await this.setActive(null);
   }
   async duplicate(id) {

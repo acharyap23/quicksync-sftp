@@ -42,7 +42,7 @@ function getHtml(webview, mediaUri, n) {
   </div>
   <div class="row"><label for="user">User</label><input id="user" /></div>
   <div class="row" id="rowPassword"><label for="password">Password</label><input id="password" type="password" /></div>
-  <div class="row"><label for="notes">Notes</label><textarea id="notes" rows="3" placeholder="Optional notes about this site"></textarea></div>
+  <div class="row"><label for="notes">Notes</label><textarea id="notes" rows="3" placeholder="Optional notes — stored encrypted in the OS keychain"></textarea></div>
 </div>
 
 <div class="panel" data-panel="advanced">
@@ -92,12 +92,15 @@ function openSiteEditor(context, store, existing, hooks) {
     if (!m || typeof m.type !== 'string') return;
     if (m.type === 'ready') {
       let hasStoredSecret = false;
-      if (existing) {
+      let notes = '';
+      if (existing && existing.id) {
         const pw = await context.secrets.get(hooks.siteSecretKey(existing.id, 'password'));
         const pp = await context.secrets.get(hooks.siteSecretKey(existing.id, 'passphrase'));
         hasStoredSecret = !!(pw || pp);
+        notes = (await context.secrets.get(hooks.siteSecretKey(existing.id, 'notes'))) || '';
       }
-      panel.webview.postMessage({ type: 'load', site: existing || {}, hasStoredSecret });
+      // Notes is a secret at rest but must be shown for editing → merge it in.
+      panel.webview.postMessage({ type: 'load', site: Object.assign({}, existing || {}, { notes }), hasStoredSecret });
       return;
     }
     if (m.type === 'cancel') {
@@ -130,11 +133,13 @@ function openSiteEditor(context, store, existing, hooks) {
         localDir: (s.localDir || '').trim() || undefined,
         hostFingerprint: s.hostFingerprint || undefined,
         maxConnections: s.maxConnections > 0 ? s.maxConnections : 0,
-        notes: typeof s.notes === 'string' ? s.notes.slice(0, 2000) : '',
       };
       await store.save(site);
       if (s.password) await context.secrets.store(hooks.siteSecretKey(id, 'password'), s.password);
       if (s.passphrase) await context.secrets.store(hooks.siteSecretKey(id, 'passphrase'), s.passphrase);
+      // Notes may contain anything the user types (incl. credentials), so store
+      // it encrypted in the OS keychain — never in plaintext globalState.
+      await context.secrets.store(hooks.siteSecretKey(id, 'notes'), typeof s.notes === 'string' ? s.notes.slice(0, 2000) : '');
       panel.dispose();
       if (hooks.onSaved) hooks.onSaved(site, m.type === 'saveAndConnect');
     }
