@@ -370,6 +370,30 @@ function makeHostVerifier(cfg) {
 
 // ---------- SFTP operations ----------
 
+// Detect whether a private key is passphrase-encrypted (legacy PEM or the
+// new OpenSSH format) so we can prompt for the passphrase before connecting.
+function isEncryptedKey(buf) {
+  const head = buf.toString('utf8', 0, Math.min(buf.length, 6000));
+  if (/Proc-Type:\s*4,ENCRYPTED/i.test(head)) return true; // legacy PEM (RSA/EC/DSA)
+  if (head.includes('-----BEGIN OPENSSH PRIVATE KEY-----')) {
+    try {
+      const b64 = head.replace('-----BEGIN OPENSSH PRIVATE KEY-----', '').split('-----END')[0].replace(/\s+/g, '');
+      const data = Buffer.from(b64, 'base64');
+      const magic = 'openssh-key-v1\0';
+      if (data.slice(0, magic.length).toString('latin1') === magic) {
+        let off = magic.length;
+        const len = data.readUInt32BE(off);
+        off += 4;
+        const cipher = data.slice(off, off + len).toString('utf8');
+        return cipher && cipher !== 'none';
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return false;
+}
+
 async function connectSftp(cfg) {
   const sftp = new SftpClient();
   const connectOpts = {
@@ -433,12 +457,26 @@ async function connectSftp(cfg) {
       /* non-fatal */
     }
     connectOpts.privateKey = fs.readFileSync(real);
-    const passphrase = await extContext.secrets.get(secretKey(cfg, 'passphrase'));
+    let passphrase = await extContext.secrets.get(secretKey(cfg, 'passphrase'));
     if (passphrase) {
-      if (!(await ensureCredentialAllowedInWorkspace(cfg))) // R2
+      // Reusing a stored passphrase — confirm for this workspace (R2).
+      if (!(await ensureCredentialAllowedInWorkspace(cfg)))
         throw new Error('Credential use was not authorized for this workspace.');
-      connectOpts.passphrase = passphrase;
+    } else if (isEncryptedKey(connectOpts.privateKey)) {
+      // Encrypted key with no stored passphrase → prompt securely and save it.
+      passphrase = await vscode.window.showInputBox({
+        prompt: `Passphrase for key ${path.basename(real)}`,
+        password: true,
+        ignoreFocusOut: true,
+      });
+      if (passphrase) {
+        await extContext.secrets.store(secretKey(cfg, 'passphrase'), passphrase);
+        await authorizeWorkspace(cfg);
+      } else {
+        throw new Error('Encrypted key requires a passphrase.');
+      }
     }
+    if (passphrase) connectOpts.passphrase = passphrase;
   } else {
     let password = await extContext.secrets.get(secretKey(cfg, 'password'));
     if (password) {
