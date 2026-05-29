@@ -127,11 +127,32 @@ function secretKey(cfg, name) {
 // otherwise the legacy workspace .vscode/quicksync.json.
 let siteManager = null;
 async function resolveConfig() {
+  let cfg = null;
   if (siteManager) {
     const active = siteManager.getActiveConfig();
-    if (active) return active;
+    if (active) cfg = active;
   }
-  return loadConfig();
+  if (!cfg) cfg = await loadConfig();
+  // The ignore list describes which LOCAL workspace files to skip, so it's
+  // workspace-scoped — apply the .vscode/quicksync.json "ignore" rules in BOTH
+  // site mode and workspace-config mode (sites carry no ignore list of their own).
+  if (cfg) {
+    const merged = new Set([...(Array.isArray(cfg.ignore) ? cfg.ignore : []), ...getWorkspaceIgnore()]);
+    cfg.ignore = [...merged];
+  }
+  return cfg;
+}
+
+// Side-effect-free read of the workspace quicksync.json "ignore" array.
+function getWorkspaceIgnore() {
+  const p = getConfigPath();
+  if (!p || !fs.existsSync(p)) return [];
+  try {
+    const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return Array.isArray(cfg.ignore) ? cfg.ignore.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 // Lightweight, side-effect-free read of the workspace config for display in the
