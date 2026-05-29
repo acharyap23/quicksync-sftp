@@ -1,56 +1,53 @@
 # QuickSync SFTP
 
-A minimal VS Code extension that adds a one-click **Sync** button to your status bar for SFTP uploads. No auto-on-save — you sync only when you decide to.
+A secure, native SFTP client for VS Code — browse and edit your server, sync files
+manually or on save, with a transfer queue, diff-before-overwrite, and an optional
+FileZilla-style dual-pane view. Safe by default: nothing auto-uploads unless you turn
+it on, and secrets are never pushed or stored in your project.
 
-## Features
+## Interfaces
 
-- **One-click status bar button** (`☁ Sync`) — uploads files changed since the last sync.
-- **Keyboard shortcut**: `Ctrl+Alt+S` (Windows/Linux) or `Cmd+Alt+S` (Mac).
-- **Two modes**:
-  - `QuickSync: Sync Changed Files` — only files modified since last sync (fast).
-  - `QuickSync: Sync All to Remote` — full upload (asks for confirmation).
-- **SSH key or password** authentication — secrets are stored in the OS keychain, never in the project.
-- **Verified, encrypted transport** — SSH host-key pinning and a strong-algorithm-only policy.
-- **Ignore list** plus a built-in, non-overridable deny-list for secrets and junk files.
+- **QuickSync sidebar (primary)** — a native tree view of your remote server in the
+  activity bar. Browse folders, open & edit files, upload/download, rename, delete,
+  create files/folders, multi-select.
+- **Transfers view** — a live queue showing each upload's progress, speed, ETA and
+  state, with cancel/retry.
+- **Dual-Pane Explorer (optional)** — a FileZilla-style local↔remote panel
+  (`QuickSync: Open Dual-Pane Explorer`) with navigation, filter, multi-select and
+  drag-to-upload. CSP-locked webview.
+- **Manual controls** — status-bar button, `Ctrl+Alt+S` / `Cmd+Alt+S`, editor-title
+  and Explorer right-click commands.
 
 ## Security model (read this)
 
 QuickSync is built to be safe against a hostile network and a hostile repository:
 
-- **Host-key verification (anti-MITM).** On the first connection to a server you confirm its SHA-256 fingerprint and it is *pinned*. If the key ever changes, the connection is **refused** with a warning — there is no silent trust.
-- **Strong algorithms only.** Weak ciphers/KEX/MACs are not offered, blocking downgrade attacks.
-- **Secrets in the OS keychain.** Passwords and key passphrases are stored via VS Code `SecretStorage` (Keychain / DPAPI / libsecret) — **never** written to `quicksync.json`. If an old config still contains a plaintext secret, it is migrated to the keychain and stripped from the file automatically (rotate that secret if it was ever committed).
-- **Workspace trust.** The extension does nothing in untrusted workspaces, and reusing a saved credential in a *different* workspace requires explicit confirmation.
-- **Secret deny-list.** `.env*`, `*.pem/.key/.p12/.ppk`, `id_rsa*`, `.ssh/`, `.aws/`, `.npmrc`, `.netrc`, `credentials*`, `secrets*`, database dumps and backup archives are **always** skipped, regardless of your `ignore` list.
-- **Confirmation before mass upload / overwrite**, atomic uploads (temp-then-rename), and a single-flight lock.
+- **Host-key verification (anti-MITM):** the server's SHA-256 fingerprint is pinned
+  on first connect; a changed key is **refused**. Set `hostFingerprint` to pre-pin.
+- **Strong algorithms only** — downgrade-resistant KEX/cipher/MAC/host-key policy.
+- **Secrets in the OS keychain** via `SecretStorage` — never in `quicksync.json`.
+  Plaintext secrets found in config are migrated out and scrubbed (rotate them if
+  they were ever committed).
+- **Workspace Trust required**; reuse of a saved credential in a new workspace needs
+  confirmation; the dual-pane and all sync paths are disabled in untrusted workspaces.
+- **Non-overridable deny-list** — `.env*`, `*.pem/.key/.p12/.ppk`, `id_rsa*`, `.ssh/`,
+  `.aws/`, `.npmrc`, credentials/secrets, DB dumps and backup archives are **never**
+  uploaded, even manually.
+- **Deployment safety scan** — warns about other sensitive files (server configs,
+  certs, embedded private keys / cloud tokens) with Upload / Skip / Always-Ignore.
+- **Atomic uploads** (temp-then-rename), path-traversal & symlink/junction containment,
+  confirmation before mass upload/overwrite, conflict detection when editing remote files.
+- **No telemetry.** Data goes only to the server you configure.
 
-> ⚠️ **Client-side controls cannot confine a server-side account.** The only reliable way to guarantee uploads can't escape your deployment directory is to harden the server — see [Server-side hardening](#server-side-hardening-strongly-recommended) below.
+> ⚠️ Client-side checks can't confine an over-privileged SSH account. Harden the server
+> too — see [Server-side hardening](#server-side-hardening-strongly-recommended).
 
-## Installation (local development)
+## Setup
 
-1. Copy this folder somewhere permanent, e.g. `~/vscode-extensions/quicksync-sftp`.
-2. Install the runtime dependency from the committed lockfile:
-   ```bash
-   npm ci
-   ```
-3. Install the VS Code extension packager (one-time):
-   ```bash
-   npm install -g @vscode/vsce
-   ```
-4. Package the extension into a `.vsix` file:
-   ```bash
-   vsce package
-   ```
-   This produces something like `quicksync-sftp-0.1.0.vsix`.
-5. Install it in VS Code:
-   - Open VS Code → Extensions panel → `…` menu → **Install from VSIX…** → pick the file.
-   - Or from terminal: `code --install-extension quicksync-sftp-0.1.0.vsix`
-
-## First-time setup
-
-1. Open your project folder in VS Code (and **Trust** it).
-2. Command Palette (`Ctrl+Shift+P`) → **QuickSync: Create Config File**. This writes a template to `.vscode/quicksync.json` and adds it to `.gitignore`.
-3. Edit the generated `.vscode/quicksync.json`:
+1. Install dependencies and package (see Development below) or install the `.vsix`.
+2. Open your project and **Trust** the workspace.
+3. Command Palette → **QuickSync: Create Config File** → edit `.vscode/quicksync.json`
+   (auto-added to `.gitignore`):
    ```json
    {
      "host": "your-server.com",
@@ -61,60 +58,68 @@ QuickSync is built to be safe against a hostile network and a hostile repository
      "ignore": ["dist", "*.log", "tmp"]
    }
    ```
-   **Do not put a `password` or `passphrase` here.** For password auth, leave `privateKeyPath` out — you'll be prompted securely on first sync and the value goes to the OS keychain. For an encrypted key, you'll likewise be prompted for the passphrase.
-4. Click the **☁ Sync** button (or press `Ctrl+Alt+S`). On the first connect, verify the displayed fingerprint against your server (`ssh-keyscan -t ed25519 your-server.com | ssh-keygen -lf -`) before trusting it.
-
-## Config options
-
-| Key | Description |
-|---|---|
-| `host` | SFTP server hostname (**required**) |
-| `port` | Port (default `22`) |
-| `username` | SSH username (**required**; avoid `root`) |
-| `privateKeyPath` | Path to SSH private key (`~` is expanded). Omit to use password auth. |
-| `remotePath` | Base directory on the server (**required**; must be absolute, no `..`) |
-| `hostFingerprint` | *(optional)* Expected SHA-256 host fingerprint to pin up front (e.g. `SHA256:…`). If set, it is authoritative. |
-| `ignore` | Array of names/globs to skip (e.g. `"dist"`, `"*.log"`). Matched per path-segment; `*` and `?` supported. |
-
-Secrets (`password`, `passphrase`) are **not** config keys — they live in the OS keychain.
+   Do **not** put a `password`/`passphrase` here — you'll be prompted securely and the
+   value goes to the OS keychain. Optionally set `hostFingerprint` (e.g. `SHA256:…`).
+4. Open the **QuickSync** sidebar and click **Connect**, or press `Ctrl+Alt+S`. On first
+   connect, verify the displayed fingerprint out-of-band before trusting it.
 
 ## Commands
 
-| Command | What it does |
+| Command | Action |
 |---|---|
-| `QuickSync: Sync Changed Files` | Upload files modified since the last sync this session |
-| `QuickSync: Sync All to Remote` | Full upload (with confirmation) |
-| `QuickSync: Create Config File` | Generate the template and `.gitignore` entry |
-| `QuickSync: Reset Host Key` | Forget the pinned host key (use only after verifying a legitimate key rotation) |
-| `QuickSync: Clear Saved Credentials` | Delete the stored password/passphrase and revoke this workspace's authorization |
+| Sync Current File / Selected File(s) / Folder / Workspace | Upload via the transfer queue |
+| Compare with Remote | Diff local vs remote (size/mtime/SHA-256 + VS Code diff) |
+| Open Dual-Pane Explorer | FileZilla-style local↔remote panel |
+| Remote: Connect / Disconnect / Refresh | Manage the connection / tree |
+| Remote: New File / New Folder / Rename / Delete / Download / Upload Here | File ops |
+| Reset Host Key | Forget a pinned key (after a verified rotation) |
+| Clear Saved Credentials | Delete stored password/passphrase |
+| Clear Safety "Always Ignore" List | Reset per-workspace safety choices |
+
+## Settings
+
+| Setting | Default | Description |
+|---|---|---|
+| `quicksync.showStatusBar` | `true` | Show the status-bar sync button |
+| `quicksync.autoSync` | `off` | `off` / `currentFile` / `workspaceChanges` — auto-upload on save |
+| `quicksync.autoSyncDebounce` | `1000` | Debounce (ms) before auto-sync uploads |
+| `quicksync.autoUpload` | `false` | Auto-upload files opened **from** the remote on save (no prompt) |
+| `quicksync.concurrentTransfers` | `1` | Parallel uploads in the queue (1 = sequential) |
+| `quicksync.compareBeforeOverwrite` | `false` | Compare/confirm before overwriting on single-file sync |
+| `quicksync.enterpriseMode` | `false` | Require confirmations; enforce host-fingerprint pinning (no TOFU) |
+
+Secrets (`password`, `passphrase`) are **not** settings — they live in the OS keychain.
 
 ## Server-side hardening (strongly recommended)
 
-QuickSync validates paths client-side, but a malicious or misconfigured server, or an overly powerful SSH account, can still let uploads land outside your intended directory. Confine the deployment account on the server:
+Confine the deployment account so uploads can't escape the target directory:
 
-1. **Create a dedicated, least-privilege deploy user** — never deploy as `root`:
-   ```bash
-   sudo adduser --disabled-password --gecos "" deploy
-   sudo mkdir -p /var/www/html && sudo chown root:root /var/www
-   ```
-2. **Chroot it to the deployment root** with SFTP-only access. In `/etc/ssh/sshd_config`:
+1. Create a least-privilege `deploy` user — never deploy as `root`.
+2. Chroot it in `/etc/ssh/sshd_config`:
    ```
    Match User deploy
        ChrootDirectory /var/www
        ForceCommand internal-sftp
        AllowTcpForwarding no
-       X11Forwarding no
-       PermitTunnel no
    ```
-   > `ChrootDirectory` must be owned by `root` and not writable by the user; put the writable web root one level below (e.g. `/var/www/html`).
-3. **Install only the public key** for the deploy user (`~deploy/.ssh/authorized_keys`, mode `600`); disable password auth for it.
-4. **Restrict file permissions** so deployed files aren't world-writable; serve the web root read-only to the web server where possible.
+   `ChrootDirectory` must be root-owned and not writable by the user; put the writable
+   web root one level below (e.g. `/var/www/html`).
+3. Install only the public key for `deploy`; disable its password auth.
 
-With this in place, even a crafted `remotePath` cannot escape `/var/www`, and a stolen deploy key grants nothing beyond writing files to that directory.
+With this, even a crafted `remotePath` cannot escape `/var/www`.
+
+## Development
+
+```bash
+npm ci            # locked install
+npm run build     # bundle with esbuild
+npx @vscode/vsce package
+```
+
+CI runs `npm audit` and produces a checksummed, provenance-attested release on tags.
 
 ## Notes
 
-- Prefer SSH keys over passwords; keep keys at `chmod 600` (QuickSync warns if a key is group/world-readable).
-- The "changed files" mode tracks mtime since the last successful sync in this VS Code session. After a fresh restart, the first sync re-baselines (uploads everything matching the ignore rules) and asks for confirmation.
-- Built on [`ssh2-sftp-client`](https://www.npmjs.com/package/ssh2-sftp-client). Run `npm audit` regularly; CI does this on every push (see `.github/workflows/ci.yml`).
+- Auto-sync is **off** by default; sensitive files are never auto-uploaded.
+- Built on [`ssh2-sftp-client`](https://www.npmjs.com/package/ssh2-sftp-client).
 - Security reports: see [SECURITY.md](SECURITY.md).
