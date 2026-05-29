@@ -28,10 +28,21 @@ class ConnectionManager {
     this.sftp = null;
     this.cfg = null;
     this.connecting = null; // in-flight promise (single-flight)
+    this.onChange = null; // invoked on connect / disconnect / drop
   }
 
   isConnected() {
     return !!this.sftp;
+  }
+
+  _changed() {
+    if (this.onChange) {
+      try {
+        this.onChange();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   async getClient() {
@@ -46,9 +57,11 @@ class ConnectionManager {
       if (client && client.on) {
         client.on('close', () => {
           this.sftp = null;
+          this._changed();
         });
         client.on('error', () => {
           this.sftp = null;
+          this._changed();
         });
       }
       this.sftp = sftp;
@@ -56,7 +69,9 @@ class ConnectionManager {
       return sftp;
     })();
     try {
-      return await this.connecting;
+      const s = await this.connecting;
+      this._changed();
+      return s;
     } finally {
       this.connecting = null;
     }
@@ -73,6 +88,7 @@ class ConnectionManager {
         /* already gone */
       }
     }
+    this._changed();
   }
 }
 
@@ -130,21 +146,29 @@ class RemoteTreeProvider {
   }
 
   async getChildren(element) {
-    let sftp;
-    try {
-      sftp = await this.conn.getClient();
-    } catch (err) {
-      // Show a single, clickable placeholder rather than throwing.
+    // IMPORTANT: never initiate a connection from rendering. VS Code calls
+    // getChildren when the view is restored on startup/project-open; connecting
+    // here would auto-connect (and, in enterprise mode, pop an error). Only show
+    // remote contents once a connection has been established explicitly via
+    // Connect; otherwise show a passive, click-to-connect placeholder.
+    if (!this.conn.isConnected()) {
+      if (element) return [];
       const item = new vscode.TreeItem(
-        this.conn.deps._lastError || 'Not connected — click to connect',
+        this.conn.deps && this.conn.deps._lastError ? this.conn.deps._lastError : 'Not connected — click to connect',
         vscode.TreeItemCollapsibleState.None
       );
       item.command = { command: 'quicksync.remote.connect', title: 'Connect' };
       item.iconPath = new vscode.ThemeIcon('plug');
-      return element ? [] : [item];
+      return [item];
+    }
+    let sftp;
+    try {
+      sftp = await this.conn.getClient();
+    } catch {
+      return [];
     }
 
-    const dir = element ? element.remotePath : this.conn.cfg.remotePath.replace(/\\/g, '/');
+    const dir = element ? element.remotePath : (this.conn.cfg && this.conn.cfg.remotePath ? this.conn.cfg.remotePath : '/').replace(/\\/g, '/');
     try {
       const list = await sftp.list(dir);
       return list

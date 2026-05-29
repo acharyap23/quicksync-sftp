@@ -127,11 +127,46 @@ function secretKey(cfg, name) {
 // otherwise the legacy workspace .vscode/quicksync.json.
 let siteManager = null;
 async function resolveConfig() {
+  let cfg = null;
   if (siteManager) {
     const active = siteManager.getActiveConfig();
-    if (active) return active;
+    if (active) cfg = active;
   }
-  return loadConfig();
+  if (!cfg) cfg = await loadConfig();
+  // The ignore list describes which LOCAL workspace files to skip, so it's
+  // workspace-scoped — apply the .vscode/quicksync.json "ignore" rules in BOTH
+  // site mode and workspace-config mode (sites carry no ignore list of their own).
+  if (cfg) {
+    const merged = new Set([...(Array.isArray(cfg.ignore) ? cfg.ignore : []), ...getWorkspaceIgnore()]);
+    cfg.ignore = [...merged];
+  }
+  return cfg;
+}
+
+// Side-effect-free read of the workspace quicksync.json "ignore" array.
+function getWorkspaceIgnore() {
+  const p = getConfigPath();
+  if (!p || !fs.existsSync(p)) return [];
+  try {
+    const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return Array.isArray(cfg.ignore) ? cfg.ignore.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+// Lightweight, side-effect-free read of the workspace config for display in the
+// Site Manager (no migration, no secrets, no prompts). Returns null if absent.
+function getWorkspaceConfigInfo() {
+  const p = getConfigPath();
+  if (!p || !fs.existsSync(p)) return null;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!cfg || typeof cfg.host !== 'string') return null;
+    return { host: cfg.host, username: cfg.username || '', port: cfg.port || 22, remotePath: cfg.remotePath || '/' };
+  } catch {
+    return null;
+  }
 }
 
 // R2: SecretStorage is global to the extension, so a stored credential can be
@@ -326,14 +361,32 @@ function makeHostVerifier(cfg) {
       return cb(false);
     }
 
-    // Enterprise mode enforces explicit pinning — no trust-on-first-use.
+    // Enterprise mode: no silent trust-on-first-use. Show the presented
+    // fingerprint and require an explicit, informed decision. "Trust & Pin"
+    // accepts it for this host (a later key change is still refused); "Copy
+    // Fingerprint" lets the user pin it via config instead.
     if (enterpriseMode()) {
-      vscode.window.showErrorMessage(
-        `QuickSync (enterprise mode): refusing to trust the unverified host ${host}:${port}. ` +
-          `Set "hostFingerprint" (SHA256:…) in .vscode/quicksync.json and reconnect.`,
-        { modal: true }
-      );
-      return cb(false);
+      const sha = 'SHA256:' + fp;
+      vscode.window
+        .showWarningMessage(
+          `QuickSync (enterprise mode): host ${host}:${port} is not yet trusted.\n\n` +
+            `The server presented:\n${sha}\n\n` +
+            `Verify this fingerprint through a trusted channel. "Trust & Pin" accepts it now ` +
+            `(a future key change will be refused). Otherwise Copy it and set "hostFingerprint" in config.`,
+          { modal: true },
+          'Trust & Pin',
+          'Copy Fingerprint'
+        )
+        .then((choice) => {
+          if (choice === 'Trust & Pin') {
+            extContext.globalState.update(pinKey(host, port), fp);
+            cb(true);
+          } else {
+            if (choice === 'Copy Fingerprint') vscode.env.clipboard.writeText(sha);
+            cb(false);
+          }
+        });
+      return;
     }
 
     // Trust On First Use: confirm with the user, then pin.
@@ -356,7 +409,40 @@ function makeHostVerifier(cfg) {
 
 // ---------- SFTP operations ----------
 
+// Detect whether a private key is passphrase-encrypted (legacy PEM or the
+// new OpenSSH format) so we can prompt for the passphrase before connecting.
+function isEncryptedKey(buf) {
+  const head = buf.toString('utf8', 0, Math.min(buf.length, 6000));
+  if (/Proc-Type:\s*4,ENCRYPTED/i.test(head)) return true; // legacy PEM (RSA/EC/DSA)
+  if (head.includes('-----BEGIN OPENSSH PRIVATE KEY-----')) {
+    try {
+      const b64 = head.replace('-----BEGIN OPENSSH PRIVATE KEY-----', '').split('-----END')[0].replace(/\s+/g, '');
+      const data = Buffer.from(b64, 'base64');
+      const magic = 'openssh-key-v1\0';
+      if (data.slice(0, magic.length).toString('latin1') === magic) {
+        let off = magic.length;
+        const len = data.readUInt32BE(off);
+        off += 4;
+        const cipher = data.slice(off, off + len).toString('utf8');
+        return cipher && cipher !== 'none';
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return false;
+}
+
 async function connectSftp(cfg) {
+  // Tolerate a "user@host" value mistakenly placed in the host field
+  // (a common copy/paste from an `ssh user@host` command).
+  if (typeof cfg.host === 'string' && cfg.host.includes('@')) {
+    const at = cfg.host.lastIndexOf('@');
+    if (!cfg.username) cfg.username = cfg.host.slice(0, at);
+    cfg.host = cfg.host.slice(at + 1);
+  }
+  if (typeof cfg.host === 'string') cfg.host = cfg.host.trim();
+
   const sftp = new SftpClient();
   const connectOpts = {
     host: cfg.host,
@@ -377,8 +463,11 @@ async function connectSftp(cfg) {
         'diffie-hellman-group16-sha512',
         'diffie-hellman-group18-sha512',
       ],
+      // NOTE: chacha20-poly1305@openssh.com is intentionally omitted — ssh2
+      // implements it only in its native addon, which this bundle does not ship
+      // (pure-JS build). Pinning it would make every connection fail with
+      // "Unsupported algorithm". AES-GCM/CTR are strong and pure-JS.
       cipher: [
-        'chacha20-poly1305@openssh.com',
         'aes256-gcm@openssh.com',
         'aes128-gcm@openssh.com',
         'aes256-ctr',
@@ -416,12 +505,26 @@ async function connectSftp(cfg) {
       /* non-fatal */
     }
     connectOpts.privateKey = fs.readFileSync(real);
-    const passphrase = await extContext.secrets.get(secretKey(cfg, 'passphrase'));
+    let passphrase = await extContext.secrets.get(secretKey(cfg, 'passphrase'));
     if (passphrase) {
-      if (!(await ensureCredentialAllowedInWorkspace(cfg))) // R2
+      // Reusing a stored passphrase — confirm for this workspace (R2).
+      if (!(await ensureCredentialAllowedInWorkspace(cfg)))
         throw new Error('Credential use was not authorized for this workspace.');
-      connectOpts.passphrase = passphrase;
+    } else if (isEncryptedKey(connectOpts.privateKey)) {
+      // Encrypted key with no stored passphrase → prompt securely and save it.
+      passphrase = await vscode.window.showInputBox({
+        prompt: `Passphrase for key ${path.basename(real)}`,
+        password: true,
+        ignoreFocusOut: true,
+      });
+      if (passphrase) {
+        await extContext.secrets.store(secretKey(cfg, 'passphrase'), passphrase);
+        await authorizeWorkspace(cfg);
+      } else {
+        throw new Error('Encrypted key requires a passphrase.');
+      }
     }
+    if (passphrase) connectOpts.passphrase = passphrase;
   } else {
     let password = await extContext.secrets.get(secretKey(cfg, 'password'));
     if (password) {
@@ -1048,6 +1151,14 @@ function activate(context) {
   // The connection resolves its target via resolveConfig (active site → legacy file).
   const conn = new ConnectionManager({ loadConfig: resolveConfig, connectSftp });
   connection = conn;
+  // Drive a context key + view refresh so Connect/Disconnect toggle by state.
+  const syncConnectedContext = () => {
+    vscode.commands.executeCommand('setContext', 'quicksync.connected', conn.isConnected());
+    vscode.commands.executeCommand('quicksync.sites.refresh');
+    vscode.commands.executeCommand('quicksync.remote.refresh');
+  };
+  conn.onChange = syncConnectedContext;
+  vscode.commands.executeCommand('setContext', 'quicksync.connected', false);
   transferQueue = registerTransferQueue(context, { audit: auditLogger });
   transferQueue.bindConnection(conn);
   registerRemoteExplorer(context, { loadConfig: resolveConfig, connectSftp, audit: auditLogger }, conn, transferQueue);
@@ -1058,8 +1169,16 @@ function activate(context) {
     connection: conn,
     connectSftp,
     audit: auditLogger,
+    getWorkspaceConfig: getWorkspaceConfigInfo,
     onActiveChanged: () => vscode.commands.executeCommand('quicksync.remote.refresh'),
   });
+  // Refresh the Site Manager when a quicksync.json is created/edited/removed.
+  const cfgWatcher = vscode.workspace.createFileSystemWatcher('**/.vscode/quicksync.json');
+  const refreshSites = () => vscode.commands.executeCommand('quicksync.sites.refresh');
+  cfgWatcher.onDidCreate(refreshSites);
+  cfgWatcher.onDidChange(refreshSites);
+  cfgWatcher.onDidDelete(refreshSites);
+  context.subscriptions.push(cfgWatcher);
 
   // Phase 6: auto-sync on save (off by default). Baseline starts now so the
   // first save in "workspaceChanges" mode doesn't push the whole tree.
