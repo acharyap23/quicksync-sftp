@@ -391,8 +391,11 @@ async function connectSftp(cfg) {
         'diffie-hellman-group16-sha512',
         'diffie-hellman-group18-sha512',
       ],
+      // NOTE: chacha20-poly1305@openssh.com is intentionally omitted — ssh2
+      // implements it only in its native addon, which this bundle does not ship
+      // (pure-JS build). Pinning it would make every connection fail with
+      // "Unsupported algorithm". AES-GCM/CTR are strong and pure-JS.
       cipher: [
-        'chacha20-poly1305@openssh.com',
         'aes256-gcm@openssh.com',
         'aes128-gcm@openssh.com',
         'aes256-ctr',
