@@ -1,6 +1,10 @@
+# With esbuild bundling, only dist/ + manifest + docs ship.
+node_modules/**
+extension.js
+esbuild.js
 .vscode/**
 .github/**
 .gitignore
+.gitattributes
 **/*.map
 **/*.vsix
-node_modules/.cache/**
