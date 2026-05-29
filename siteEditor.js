@@ -26,8 +26,8 @@ function getHtml(webview, mediaUri, n) {
 <div class="tabs">
   <button class="tab active" data-tab="general">General</button>
   <button class="tab" data-tab="advanced">Advanced</button>
-  <button class="tab disabled" title="Not applicable for SFTP">Transfer Settings</button>
-  <button class="tab disabled" title="Not applicable for SFTP">Charset</button>
+  <button class="tab" data-tab="transfer">Transfer Settings</button>
+  <button class="tab" data-tab="charset">Charset</button>
 </div>
 
 <div class="panel active" data-panel="general">
@@ -57,17 +57,47 @@ function getHtml(webview, mediaUri, n) {
   </div>
   <div class="row"><label for="user">User</label><input id="user" /></div>
   <div class="row" id="rowPassword"><label for="password">Password</label><input id="password" type="password" /></div>
+  <div class="row"><label for="notes">Notes</label><textarea id="notes" rows="3" placeholder="Optional notes about this site"></textarea></div>
   <p class="warn" id="ftpWarn">⚠ FTP transmits credentials insecurely. SFTP is recommended.</p>
   <p class="warn" id="protoWarn">Note: QuickSync currently transports SFTP only — non-SFTP sites can be saved but not connected yet.</p>
 </div>
 
 <div class="panel" data-panel="advanced">
-  <div class="row"><label for="remoteRoot">Remote Root</label><input id="remoteRoot" placeholder="/home/deploy/public_html" /></div>
-  <div class="hint">Absolute path, no ".." segments.</div>
+  <div class="row"><label for="serverType">Server type</label>
+    <select id="serverType" disabled title="SFTP is auto-handled"><option>SFTP (fixed)</option></select>
+  </div>
+  <div class="row split"><label for="localDir">Default local directory</label><input id="localDir" placeholder="(within workspace)" /><span></span><button class="btn secondary" id="browseBtn" type="button">Browse…</button></div>
+  <div class="row"><label for="remoteRoot">Default remote dir</label><input id="remoteRoot" placeholder="/home/deploy/public_html" /></div>
+  <div class="hint">Remote path must be absolute, no ".." segments.</div>
   <div class="row hide" id="rowKeyPath"><label for="keyPath">Private Key Path</label><input id="keyPath" /></div>
   <div class="row hide" id="rowPassphrase"><label for="passphrase">Passphrase</label><input id="passphrase" type="password" /></div>
   <div class="row"><label for="fingerprint">Host Fingerprint</label><input id="fingerprint" placeholder="SHA256:… (optional, pins the host key)" /></div>
   <div class="row"><label for="folder">Folder / Group</label><input id="folder" placeholder="Production (optional)" /></div>
+  <div class="row split"><label>Adjust server time, offset by</label><input id="offsetH" type="number" value="0" /><label style="text-align:right">Hrs</label><input id="offsetM" type="number" value="0" /></div>
+  <div class="hint">Bypass proxy / synchronized browsing / directory comparison are not applicable to SFTP.</div>
+</div>
+
+<div class="panel" data-panel="transfer">
+  <div class="row"><label>Transfer mode</label>
+    <span><label><input type="radio" name="tmode" checked disabled /> Default</label>
+    <label><input type="radio" name="tmode" disabled /> Active</label>
+    <label><input type="radio" name="tmode" disabled /> Passive</label></span>
+  </div>
+  <div class="hint">Active/Passive apply to FTP only — SFTP uses a single SSH channel.</div>
+  <div class="row"><label for="limitConns">Limit connections</label>
+    <span><label><input type="checkbox" id="limitConns" /> Limit simultaneous connections</label></span>
+  </div>
+  <div class="row"><label for="maxConns">Max connections</label><input id="maxConns" type="number" min="1" max="8" value="1" disabled /></div>
+  <div class="hint">Per-site override of the upload-queue concurrency (otherwise quicksync.concurrentTransfers).</div>
+</div>
+
+<div class="panel" data-panel="charset">
+  <div class="row"><label>Filename charset</label>
+    <span><label><input type="radio" name="cs" checked disabled /> UTF-8</label>
+    &nbsp;&nbsp;<label><input type="radio" name="cs" disabled /> Custom</label></span>
+  </div>
+  <div class="row"><label for="encoding">Encoding</label><input id="encoding" disabled placeholder="UTF-8" /></div>
+  <div class="hint">SFTP transfers filenames as UTF-8; custom encodings are not configurable.</div>
 </div>
 
 <div class="actions">
@@ -115,6 +145,11 @@ function openSiteEditor(context, store, existing, hooks) {
       panel.dispose();
       return;
     }
+    if (m.type === 'browseLocal') {
+      const picked = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: false, openLabel: 'Use folder' });
+      if (picked && picked[0]) panel.webview.postMessage({ type: 'localDir', path: picked[0].fsPath });
+      return;
+    }
     if (m.type === 'save' || m.type === 'saveAndConnect') {
       const s = m.site || {};
       const problem = validate(s);
@@ -133,7 +168,11 @@ function openSiteEditor(context, store, existing, hooks) {
         username: s.username.trim(),
         privateKeyPath: s.logonType === 'key' ? s.privateKeyPath || '' : '',
         remotePath: s.remotePath.trim(),
+        localDir: (s.localDir || '').trim() || undefined,
         hostFingerprint: s.hostFingerprint || undefined,
+        maxConnections: s.maxConnections > 0 ? s.maxConnections : 0,
+        timeOffsetMinutes: s.timeOffsetMinutes || 0,
+        notes: typeof s.notes === 'string' ? s.notes.slice(0, 2000) : '',
       };
       await store.save(site);
       // Secrets: only write when a non-blank value was entered (blank = keep existing).
