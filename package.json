@@ -16,12 +16,17 @@
     "vscode": "^1.75.0"
   },
   "categories": ["Other"],
+  "keywords": ["sftp", "ssh", "deploy", "sync", "upload"],
   "activationEvents": ["workspaceContains:**/.vscode/quicksync.json"],
   "main": "./extension.js",
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
       "description": "QuickSync reads connection settings from the workspace and opens outbound SFTP connections, so it only runs in trusted workspaces."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "QuickSync needs a local filesystem to read files and to open SFTP connections, so it does not run in virtual workspaces."
     }
   },
   "contributes": {
