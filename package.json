@@ -178,6 +178,12 @@
         "command": "quicksync.clearSafetyIgnores",
         "title": "Clear Safety \"Always Ignore\" List",
         "category": "QuickSync"
+      },
+      {
+        "command": "quicksync.openDualPane",
+        "title": "Open Dual-Pane Explorer",
+        "category": "QuickSync",
+        "icon": "$(split-horizontal)"
       }
     ],
     "viewsContainers": {
@@ -217,6 +223,7 @@
         { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote", "group": "navigation@1" },
         { "command": "quicksync.remote.refresh", "when": "view == quicksyncRemote", "group": "navigation@2" },
         { "command": "quicksync.remote.newFolder", "when": "view == quicksyncRemote", "group": "navigation@3" },
+        { "command": "quicksync.openDualPane", "when": "view == quicksyncRemote", "group": "navigation@4" },
         { "command": "quicksync.remote.disconnect", "when": "view == quicksyncRemote", "group": "1_conn" },
         { "command": "quicksync.queue.retryAll", "when": "view == quicksyncQueue", "group": "navigation@1" },
         { "command": "quicksync.queue.clear", "when": "view == quicksyncQueue", "group": "navigation@2" }

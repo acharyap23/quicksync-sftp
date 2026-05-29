@@ -5,6 +5,7 @@ remoteExplorer.js
 transferQueue.js
 compare.js
 safety.js
+dualPane.js
 esbuild.js
 .vscode/**
 .github/**

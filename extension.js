@@ -1039,6 +1039,17 @@ function activate(context) {
   autoSyncBaseline = Date.now();
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => scheduleAutoSync(doc)));
 
+  // Phase 8: optional FileZilla-style dual-pane webview (CSP-locked).
+  const dualPane = require('./dualPane');
+  dualPane.registerDualPane(context, {
+    loadConfig,
+    getWorkspaceRoot,
+    getConnection: () => connection,
+    getQueue: () => transferQueue,
+    shouldIgnore,
+    classify: safety.classify,
+  });
+
   const showBar = vscode.workspace.getConfiguration('quicksync').get('showStatusBar', true);
   if (showBar) {
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
