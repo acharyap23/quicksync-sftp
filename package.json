@@ -122,6 +122,27 @@
         "title": "Delete",
         "category": "QuickSync",
         "icon": "$(trash)"
+      },
+      {
+        "command": "quicksync.syncCurrentFile",
+        "title": "Sync Current File",
+        "category": "QuickSync",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "quicksync.syncSelectedFiles",
+        "title": "Sync Selected File(s)",
+        "category": "QuickSync"
+      },
+      {
+        "command": "quicksync.syncFolder",
+        "title": "Sync Folder",
+        "category": "QuickSync"
+      },
+      {
+        "command": "quicksync.syncWorkspace",
+        "title": "Sync Workspace",
+        "category": "QuickSync"
       }
     ],
     "viewsContainers": {
@@ -143,6 +164,13 @@
       ]
     },
     "menus": {
+      "editor/title": [
+        { "command": "quicksync.syncCurrentFile", "when": "resourceScheme == file", "group": "navigation" }
+      ],
+      "explorer/context": [
+        { "command": "quicksync.syncSelectedFiles", "when": "resourceScheme == file && !explorerResourceIsFolder", "group": "7_quicksync@1" },
+        { "command": "quicksync.syncFolder", "when": "explorerResourceIsFolder", "group": "7_quicksync@1" }
+      ],
       "view/title": [
         { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote", "group": "navigation@1" },
         { "command": "quicksync.remote.refresh", "when": "view == quicksyncRemote", "group": "navigation@2" },

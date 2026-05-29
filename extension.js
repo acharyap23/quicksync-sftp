@@ -582,6 +582,134 @@ async function runSync(onlyChanged) {
   }
 }
 
+// ---------- Phase 2: manual sync commands ----------
+
+// Shared trust + single-flight guard for all manual uploads.
+async function withUploadGuard(fn) {
+  if (!vscode.workspace.isTrusted) {
+    vscode.window.showWarningMessage('QuickSync is disabled in untrusted workspaces.');
+    return;
+  }
+  if (isSyncing) {
+    vscode.window.showInformationMessage('QuickSync: a sync is already in progress.');
+    return;
+  }
+  isSyncing = true;
+  try {
+    await fn();
+  } finally {
+    isSyncing = false;
+  }
+}
+
+async function uploadEntries(cfg, files, title) {
+  if (files.length === 0) {
+    vscode.window.showInformationMessage('QuickSync: nothing to upload.');
+    return;
+  }
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title, cancellable: true },
+    async (progress, token) => {
+      try {
+        const r = await uploadFiles(cfg, files, progress, token);
+        if (r.failed === 0) {
+          vscode.window.showInformationMessage(`QuickSync: uploaded ${r.uploaded} file(s) ✓`);
+        } else {
+          vscode.window.showWarningMessage(
+            `QuickSync: ${r.uploaded} uploaded, ${r.failed} failed. ${r.errors[0] || ''}`
+          );
+        }
+      } catch (err) {
+        console.error('QuickSync error:', err);
+        vscode.window.showErrorMessage('QuickSync failed: could not complete the upload.');
+      }
+    }
+  );
+}
+
+// Turn a set of URIs into upload entries: files become entries (skipping
+// out-of-workspace and deny-listed paths); directories are walked recursively.
+async function collectEntries(uris, root, cfg) {
+  const out = [];
+  const seen = new Set();
+  for (const uri of uris) {
+    const full = uri.fsPath;
+    let stat;
+    try {
+      stat = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      const walked = await walk(full, root, cfg.ignore || []);
+      for (const f of walked) {
+        if (!seen.has(f.full)) {
+          seen.add(f.full);
+          out.push(f);
+        }
+      }
+    } else if (stat.isFile()) {
+      const rel = path.relative(root, full);
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        vscode.window.showWarningMessage(`QuickSync: ${path.basename(full)} is outside the workspace; skipped.`);
+        continue;
+      }
+      if (shouldIgnore(rel, cfg.ignore)) {
+        vscode.window.showWarningMessage(`QuickSync: ${rel} is ignored (sensitive or ignore-listed); skipped.`);
+        continue;
+      }
+      if (!seen.has(full)) {
+        seen.add(full);
+        out.push({ full, rel, mtime: stat.mtimeMs });
+      }
+    }
+  }
+  return out;
+}
+
+async function syncCurrentFile() {
+  await withUploadGuard(async () => {
+    const ed = vscode.window.activeTextEditor;
+    if (!ed) {
+      vscode.window.showInformationMessage('QuickSync: no active file.');
+      return;
+    }
+    const cfg = await loadConfig();
+    if (!cfg) {
+      vscode.window.showWarningMessage('QuickSync: no config found.');
+      return;
+    }
+    await ed.document.save();
+    const root = getWorkspaceRoot();
+    const files = await collectEntries([ed.document.uri], root, cfg);
+    await uploadEntries(cfg, files, `QuickSync: uploading ${path.basename(ed.document.fileName)}`);
+  });
+}
+
+// Used by both "Sync Selected Files" (multi-select) and "Sync Folder".
+async function syncUris(uris) {
+  await withUploadGuard(async () => {
+    if (!uris || uris.length === 0) return;
+    const cfg = await loadConfig();
+    if (!cfg) {
+      vscode.window.showWarningMessage('QuickSync: no config found.');
+      return;
+    }
+    const root = getWorkspaceRoot();
+    const files = await collectEntries(uris, root, cfg);
+    const enterprise = vscode.workspace.getConfiguration('quicksync').get('enterpriseMode', false);
+    if (enterprise && files.length) {
+      const ok = await vscode.window.showWarningMessage(
+        `Upload ${files.length} file(s) to ${cfg.username}@${cfg.host}:${cfg.remotePath} (overwrites existing)?`,
+        { modal: true },
+        'Upload'
+      );
+      if (ok !== 'Upload') return;
+    }
+    await uploadEntries(cfg, files, `QuickSync: uploading ${files.length} file(s)`);
+  });
+}
+
 async function initConfig() {
   const configPath = getConfigPath();
   if (!configPath) {
@@ -698,7 +826,14 @@ function activate(context) {
     vscode.commands.registerCommand('quicksync.syncChanged', () => runSync(true)),
     vscode.commands.registerCommand('quicksync.initConfig', () => initConfig()),
     vscode.commands.registerCommand('quicksync.resetHostKey', () => resetHostKey()),
-    vscode.commands.registerCommand('quicksync.clearCredentials', () => clearCredentials())
+    vscode.commands.registerCommand('quicksync.clearCredentials', () => clearCredentials()),
+    // Phase 2: manual sync controls
+    vscode.commands.registerCommand('quicksync.syncCurrentFile', () => syncCurrentFile()),
+    vscode.commands.registerCommand('quicksync.syncSelectedFiles', (uri, uris) =>
+      syncUris(uris && uris.length ? uris : uri ? [uri] : [])
+    ),
+    vscode.commands.registerCommand('quicksync.syncFolder', (uri) => syncUris(uri ? [uri] : [])),
+    vscode.commands.registerCommand('quicksync.syncWorkspace', () => runSync(false))
   );
 
   // Phase 1: native remote explorer (reuses loadConfig/connectSftp for security).
