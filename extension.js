@@ -340,22 +340,32 @@ function makeHostVerifier(cfg) {
       return cb(false);
     }
 
-    // Enterprise mode enforces explicit pinning — no trust-on-first-use.
+    // Enterprise mode: no silent trust-on-first-use. Show the presented
+    // fingerprint and require an explicit, informed decision. "Trust & Pin"
+    // accepts it for this host (a later key change is still refused); "Copy
+    // Fingerprint" lets the user pin it via config instead.
     if (enterpriseMode()) {
       const sha = 'SHA256:' + fp;
       vscode.window
-        .showErrorMessage(
-          `QuickSync (enterprise mode): host ${host}:${port} is not pre-verified.\n\n` +
+        .showWarningMessage(
+          `QuickSync (enterprise mode): host ${host}:${port} is not yet trusted.\n\n` +
             `The server presented:\n${sha}\n\n` +
-            `Verify this fingerprint through a trusted channel, then add it as "hostFingerprint" ` +
-            `to the site / .vscode/quicksync.json and reconnect.`,
+            `Verify this fingerprint through a trusted channel. "Trust & Pin" accepts it now ` +
+            `(a future key change will be refused). Otherwise Copy it and set "hostFingerprint" in config.`,
           { modal: true },
+          'Trust & Pin',
           'Copy Fingerprint'
         )
         .then((choice) => {
-          if (choice === 'Copy Fingerprint') vscode.env.clipboard.writeText(sha);
+          if (choice === 'Trust & Pin') {
+            extContext.globalState.update(pinKey(host, port), fp);
+            cb(true);
+          } else {
+            if (choice === 'Copy Fingerprint') vscode.env.clipboard.writeText(sha);
+            cb(false);
+          }
         });
-      return cb(false);
+      return;
     }
 
     // Trust On First Use: confirm with the user, then pin.
