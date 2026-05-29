@@ -1,0 +1,379 @@
+// Site Manager — multi-site profiles (FileZilla-style).
+//
+// Stores only NON-SECRET metadata in globalState; passwords/passphrases go to
+// VS Code SecretStorage keyed per site (quicksync:site:<id>:password). One
+// "active" site drives the shared connection; the existing connection manager,
+// queue, explorer, compare and auto-sync all operate against it.
+
+const vscode = require('vscode');
+const path = require('path');
+const os = require('os');
+
+const STORE_KEY = 'quicksync.sites.v1';
+const ACTIVE_KEY = 'quicksync.activeSite';
+
+function newId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function siteSecretKey(id, name) {
+  return `quicksync:site:${id}:${name}`;
+}
+
+// ---------- Store ----------
+
+class SiteStore {
+  constructor(context) {
+    this.ctx = context;
+  }
+  list() {
+    return this.ctx.globalState.get(STORE_KEY) || [];
+  }
+  get(id) {
+    return this.list().find((s) => s.id === id) || null;
+  }
+  async _persist(sites) {
+    await this.ctx.globalState.update(STORE_KEY, sites);
+  }
+  async save(site) {
+    const sites = this.list();
+    const i = sites.findIndex((s) => s.id === site.id);
+    if (i >= 0) sites[i] = site;
+    else sites.push(site);
+    await this._persist(sites);
+    return site;
+  }
+  async remove(id) {
+    await this._persist(this.list().filter((s) => s.id !== id));
+    // SecretStorage has no enumerate; delete known secret names.
+    await this.ctx.secrets.delete(siteSecretKey(id, 'password'));
+    await this.ctx.secrets.delete(siteSecretKey(id, 'passphrase'));
+    if (this.getActiveId() === id) await this.setActive(null);
+  }
+  async duplicate(id) {
+    const src = this.get(id);
+    if (!src) return null;
+    const copy = { ...src, id: newId(), siteName: `${src.siteName} (copy)` };
+    await this.save(copy);
+    return copy; // secrets are NOT copied — user re-enters for the new site
+  }
+  getActiveId() {
+    return this.ctx.globalState.get(ACTIVE_KEY) || null;
+  }
+  getActive() {
+    const id = this.getActiveId();
+    return id ? this.get(id) : null;
+  }
+  async setActive(id) {
+    await this.ctx.globalState.update(ACTIVE_KEY, id || undefined);
+  }
+}
+
+// Convert a stored site into a connectSftp-compatible config.
+// `_siteId` routes secret lookups to the per-site SecretStorage keys.
+function siteToConfig(site) {
+  if (!site) return null;
+  let keyPath = site.privateKeyPath;
+  if (keyPath && keyPath.startsWith('~')) keyPath = path.join(os.homedir(), keyPath.slice(1));
+  return {
+    _siteId: site.id,
+    siteName: site.siteName,
+    host: site.host,
+    port: site.port || 22,
+    username: site.username,
+    privateKeyPath: keyPath ? path.resolve(keyPath) : undefined,
+    remotePath: site.remotePath,
+    hostFingerprint: site.hostFingerprint,
+    protocol: site.protocol || 'sftp',
+  };
+}
+
+// ---------- Tree ----------
+
+class SiteItem extends vscode.TreeItem {
+  constructor(site, isActive, isConnected, durationText) {
+    super(site.siteName || site.host, vscode.TreeItemCollapsibleState.None);
+    this.site = site;
+    this.contextValue = isActive ? 'quicksyncSiteActive' : 'quicksyncSite';
+    this.description = `${site.username}@${site.host}:${site.port || 22}` + (isConnected ? `  ● ${durationText}` : '');
+    this.tooltip = `${site.protocol || 'sftp'}://${site.username}@${site.host}:${site.port || 22}\n${site.remotePath || ''}`;
+    this.iconPath = new vscode.ThemeIcon(isConnected ? 'vm-active' : isActive ? 'vm' : 'server-environment');
+  }
+}
+class FolderItem extends vscode.TreeItem {
+  constructor(name) {
+    super(name, vscode.TreeItemCollapsibleState.Expanded);
+    this.contextValue = 'quicksyncSiteFolder';
+    this.iconPath = vscode.ThemeIcon.Folder;
+  }
+}
+
+class SitesTreeProvider {
+  constructor(mgr) {
+    this.mgr = mgr;
+    this._onDidChangeTreeData = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._onDidChangeTreeData.event;
+  }
+  refresh() {
+    this._onDidChangeTreeData.fire();
+  }
+  getTreeItem(el) {
+    return el;
+  }
+  _siteItem(s) {
+    const activeId = this.mgr.store.getActiveId();
+    const connected = this.mgr.connectedSiteId === s.id;
+    return new SiteItem(s, s.id === activeId, connected, this.mgr.durationText());
+  }
+  getChildren(element) {
+    const sites = this.mgr.store.list();
+    if (element && element.contextValue === 'quicksyncSiteFolder') {
+      return sites.filter((s) => (s.folder || '') === element.label).map((s) => this._siteItem(s));
+    }
+    if (element) return [];
+    if (sites.length === 0) {
+      const hint = new vscode.TreeItem('No sites — click + to add one', vscode.TreeItemCollapsibleState.None);
+      hint.command = { command: 'quicksync.sites.new', title: 'New Site' };
+      hint.iconPath = new vscode.ThemeIcon('add');
+      return [hint];
+    }
+    const folders = [...new Set(sites.map((s) => s.folder).filter(Boolean))].sort();
+    const top = [];
+    for (const f of folders) top.push(new FolderItem(f));
+    for (const s of sites.filter((s) => !s.folder)) top.push(this._siteItem(s));
+    return top;
+  }
+}
+
+// ---------- Input flow ----------
+
+async function promptSite(ctx, store, existing) {
+  const e = existing || {};
+  const siteName = await vscode.window.showInputBox({ prompt: 'Site name', value: e.siteName || '', ignoreFocusOut: true });
+  if (siteName === undefined) return null;
+  const host = await vscode.window.showInputBox({ prompt: 'Host', value: e.host || '', ignoreFocusOut: true });
+  if (!host) return null;
+  const portStr = await vscode.window.showInputBox({ prompt: 'Port', value: String(e.port || 22), ignoreFocusOut: true });
+  if (portStr === undefined) return null;
+  const port = parseInt(portStr, 10) || 22;
+
+  const protoPick = await vscode.window.showQuickPick(
+    [
+      { label: 'SFTP', detail: 'SSH File Transfer Protocol (recommended)', value: 'sftp' },
+      { label: 'FTPS', detail: 'Not yet supported — coming later', value: 'ftps' },
+      { label: 'SCP', detail: 'Not yet supported — coming later', value: 'scp' },
+      { label: 'FTP', detail: '⚠ Insecure: transmits credentials in clear text', value: 'ftp' },
+    ],
+    { placeHolder: 'Protocol', ignoreFocusOut: true }
+  );
+  if (!protoPick) return null;
+  const protocol = protoPick.value;
+  if (protocol === 'ftp') {
+    await vscode.window.showWarningMessage('FTP transmits credentials insecurely. SFTP is recommended.', { modal: true }, 'I understand');
+  }
+  if (protocol !== 'sftp') {
+    vscode.window.showWarningMessage(`QuickSync currently transports SFTP only. The site is saved as ${protocol.toUpperCase()} but cannot connect yet.`);
+  }
+
+  const username = await vscode.window.showInputBox({ prompt: 'Username', value: e.username || '', ignoreFocusOut: true });
+  if (!username) return null;
+  const remotePath = await vscode.window.showInputBox({
+    prompt: 'Remote root directory (absolute, no "..")',
+    value: e.remotePath || '/',
+    ignoreFocusOut: true,
+    validateInput: (v) => (v && v.startsWith('/') && !v.split('/').includes('..') ? null : 'Must be an absolute path without ".." segments'),
+  });
+  if (!remotePath) return null;
+
+  const authPick = await vscode.window.showQuickPick(
+    [
+      { label: 'SSH private key', value: 'key' },
+      { label: 'Password', value: 'password' },
+    ],
+    { placeHolder: 'Authentication method', ignoreFocusOut: true }
+  );
+  if (!authPick) return null;
+
+  const id = e.id || newId();
+  const folder = await vscode.window.showInputBox({
+    prompt: 'Folder/group (optional, e.g. Production)',
+    value: e.folder || '',
+    ignoreFocusOut: true,
+  });
+
+  let privateKeyPath = e.privateKeyPath;
+  if (authPick.value === 'key') {
+    privateKeyPath = await vscode.window.showInputBox({
+      prompt: 'Private key path (~ allowed)',
+      value: e.privateKeyPath || '~/.ssh/id_rsa',
+      ignoreFocusOut: true,
+    });
+    if (!privateKeyPath) return null;
+    const passphrase = await vscode.window.showInputBox({ prompt: 'Key passphrase (leave blank if none)', password: true, ignoreFocusOut: true });
+    if (passphrase) await ctx.secrets.store(siteSecretKey(id, 'passphrase'), passphrase);
+  } else {
+    privateKeyPath = undefined;
+    const password = await vscode.window.showInputBox({ prompt: `Password for ${username}@${host}`, password: true, ignoreFocusOut: true });
+    if (password) await ctx.secrets.store(siteSecretKey(id, 'password'), password);
+  }
+
+  return {
+    id,
+    siteName: siteName || host,
+    folder: folder || '',
+    host,
+    port,
+    protocol,
+    username,
+    privateKeyPath,
+    remotePath,
+    hostFingerprint: e.hostFingerprint,
+  };
+}
+
+// ---------- Manager / registration ----------
+
+function registerSiteManager(context, deps) {
+  // deps: { connection, connectSftp, onActiveChanged }
+  const store = new SiteStore(context);
+  const mgr = {
+    store,
+    connectedSiteId: null,
+    connectedAt: 0,
+    durationText() {
+      if (!this.connectedAt) return '';
+      const s = Math.floor((Date.now() - this.connectedAt) / 1000);
+      if (s < 60) return `${s}s`;
+      const m = Math.floor(s / 60);
+      return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${m % 60}m`;
+    },
+    getActiveConfig() {
+      return siteToConfig(store.getActive());
+    },
+  };
+
+  const provider = new SitesTreeProvider(mgr);
+  const view = vscode.window.createTreeView('quicksyncSites', { treeDataProvider: provider });
+  context.subscriptions.push(view);
+  // Refresh duration display periodically while connected.
+  const ticker = setInterval(() => {
+    if (mgr.connectedSiteId) provider.refresh();
+  }, 10000);
+  context.subscriptions.push({ dispose: () => clearInterval(ticker) });
+
+  const reg = (id, fn) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
+
+  reg('quicksync.sites.new', async () => {
+    const site = await promptSite(context, store, null);
+    if (!site) return;
+    await store.save(site);
+    provider.refresh();
+    vscode.window.showInformationMessage(`QuickSync: saved site "${site.siteName}".`);
+  });
+
+  reg('quicksync.sites.edit', async (item) => {
+    if (!item || !item.site) return;
+    const site = await promptSite(context, store, item.site);
+    if (!site) return;
+    await store.save(site);
+    provider.refresh();
+  });
+
+  reg('quicksync.sites.duplicate', async (item) => {
+    if (!item || !item.site) return;
+    await store.duplicate(item.site.id);
+    provider.refresh();
+    vscode.window.showInformationMessage('QuickSync: site duplicated (re-enter its credentials).');
+  });
+
+  reg('quicksync.sites.delete', async (item) => {
+    if (!item || !item.site) return;
+    const ok = await vscode.window.showWarningMessage(`Delete site "${item.site.siteName}" and its saved credentials?`, { modal: true }, 'Delete');
+    if (ok !== 'Delete') return;
+    await store.remove(item.site.id);
+    provider.refresh();
+  });
+
+  async function connectSite(site) {
+    if (!vscode.workspace.isTrusted) {
+      vscode.window.showWarningMessage('QuickSync is disabled in untrusted workspaces.');
+      return;
+    }
+    if ((site.protocol || 'sftp') !== 'sftp') {
+      vscode.window.showWarningMessage(`QuickSync can only connect via SFTP right now (site "${site.siteName}" is ${site.protocol.toUpperCase()}).`);
+      return;
+    }
+    await deps.connection.disconnect(); // drop any prior site's connection
+    await store.setActive(site.id);
+    if (deps.onActiveChanged) deps.onActiveChanged();
+    try {
+      await deps.connection.getClient(); // uses resolveConfig → active site
+      mgr.connectedSiteId = site.id;
+      mgr.connectedAt = Date.now();
+      provider.refresh();
+      vscode.commands.executeCommand('quicksync.remote.refresh');
+      vscode.window.showInformationMessage(`QuickSync: connected to ${site.siteName}.`);
+    } catch (err) {
+      mgr.connectedSiteId = null;
+      provider.refresh();
+      vscode.window.showErrorMessage(`QuickSync: connection to ${site.siteName} failed (${err.message}).`);
+    }
+  }
+
+  reg('quicksync.sites.connect', (item) => item && item.site && connectSite(item.site));
+
+  reg('quicksync.sites.disconnect', async () => {
+    await deps.connection.disconnect();
+    mgr.connectedSiteId = null;
+    mgr.connectedAt = 0;
+    provider.refresh();
+    vscode.commands.executeCommand('quicksync.remote.refresh');
+    vscode.window.showInformationMessage('QuickSync: disconnected.');
+  });
+
+  reg('quicksync.sites.test', async (item) => {
+    if (!item || !item.site) return;
+    const site = item.site;
+    if ((site.protocol || 'sftp') !== 'sftp') {
+      vscode.window.showWarningMessage('Test supports SFTP only for now.');
+      return;
+    }
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Testing ${site.siteName}…` },
+      async () => {
+        const cfg = siteToConfig(site);
+        let sftp;
+        try {
+          sftp = await deps.connectSftp(cfg); // full host-key verification applies
+        } catch (err) {
+          vscode.window.showErrorMessage(`Test failed — connect/auth: ${err.message}`);
+          return;
+        }
+        try {
+          await sftp.list(cfg.remotePath);
+          vscode.window.showInformationMessage(`✓ ${site.siteName}: connected, authenticated, and "${cfg.remotePath}" is listable.`);
+        } catch (err) {
+          vscode.window.showWarningMessage(`Connected & authenticated, but cannot list "${cfg.remotePath}": ${err.message}`);
+        } finally {
+          try {
+            await sftp.end();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    );
+  });
+
+  // Auto-connect last active site on startup (opt-in).
+  if (vscode.workspace.getConfiguration('quicksync').get('autoConnectLastSite', false)) {
+    const active = store.getActive();
+    if (active && (active.protocol || 'sftp') === 'sftp' && vscode.workspace.isTrusted) {
+      connectSite(active);
+    }
+  }
+
+  return mgr;
+}
+
+module.exports = { registerSiteManager, siteToConfig, SiteStore, siteSecretKey };

@@ -6,6 +6,7 @@ transferQueue.js
 compare.js
 safety.js
 dualPane.js
+sites.js
 esbuild.js
 .vscode/**
 .github/**

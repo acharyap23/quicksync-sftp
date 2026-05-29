@@ -116,7 +116,20 @@ async function loadConfig() {
 // ---------- Secrets (C-2) ----------
 
 function secretKey(cfg, name) {
+  // Site Manager configs carry _siteId → per-site secret namespace.
+  if (cfg._siteId) return `quicksync:site:${cfg._siteId}:${name}`;
   return `quicksync:${cfg.host}:${cfg.port || 22}:${cfg.username}:${name}`;
+}
+
+// Resolve the connection config: the active Site Manager site if one is set,
+// otherwise the legacy workspace .vscode/quicksync.json.
+let siteManager = null;
+async function resolveConfig() {
+  if (siteManager) {
+    const active = siteManager.getActiveConfig();
+    if (active) return active;
+  }
+  return loadConfig();
 }
 
 // R2: SecretStorage is global to the extension, so a stored credential can be
@@ -524,7 +537,7 @@ async function runSync(onlyChanged) {
   isSyncing = true;
 
   try {
-    const cfg = await loadConfig();
+    const cfg = await resolveConfig();
     if (!cfg) {
       const choice = await vscode.window.showWarningMessage('QuickSync: no config found.', 'Create config');
       if (choice === 'Create config') await initConfig();
@@ -628,7 +641,7 @@ async function compareWithRemoteCommand(uri) {
     vscode.window.showInformationMessage('QuickSync: no file to compare.');
     return;
   }
-  const cfg = await loadConfig();
+  const cfg = await resolveConfig();
   if (!cfg) {
     vscode.window.showWarningMessage('QuickSync: no config found.');
     return;
@@ -761,7 +774,7 @@ async function flushAutoSync() {
   const mode = autoSyncMode();
   if (mode === 'off') return;
   if (!vscode.workspace.isTrusted) return;
-  const cfg = await loadConfig();
+  const cfg = await resolveConfig();
   if (!cfg) return;
   const root = getWorkspaceRoot();
   if (!root) return;
@@ -843,7 +856,7 @@ async function syncCurrentFile() {
     vscode.window.showInformationMessage('QuickSync: no active file.');
     return;
   }
-  const cfg = await loadConfig();
+  const cfg = await resolveConfig();
   if (!cfg) {
     vscode.window.showWarningMessage('QuickSync: no config found.');
     return;
@@ -874,7 +887,7 @@ async function syncCurrentFile() {
 async function syncUris(uris) {
   if (!requireTrust()) return;
   if (!uris || uris.length === 0) return;
-  const cfg = await loadConfig();
+  const cfg = await resolveConfig();
   if (!cfg) {
     vscode.window.showWarningMessage('QuickSync: no config found.');
     return;
@@ -937,7 +950,7 @@ async function initConfig() {
 // Clears a pinned host key so the next connect re-runs TOFU. Use only when
 // you have independently verified the server key legitimately changed.
 async function resetHostKey() {
-  const cfg = await loadConfig();
+  const cfg = await resolveConfig();
   if (!cfg) {
     vscode.window.showErrorMessage('QuickSync: no config found.');
     return;
@@ -962,7 +975,7 @@ async function resetHostKey() {
 // R7: erase stored password/passphrase and revoke this workspace's authorization
 // for the configured host/user (data-minimization / right-to-erasure hygiene).
 async function clearCredentials() {
-  const cfg = await loadConfig();
+  const cfg = await resolveConfig();
   if (!cfg) {
     vscode.window.showErrorMessage('QuickSync: no config found.');
     return;
@@ -1027,12 +1040,20 @@ function activate(context) {
   // Phases 1+3: native remote explorer + transfer queue, sharing one connection.
   const { registerRemoteExplorer, ConnectionManager } = require('./remoteExplorer');
   const { registerTransferQueue } = require('./transferQueue');
-  const deps = { loadConfig, connectSftp };
-  const conn = new ConnectionManager(deps);
+  // The connection resolves its target via resolveConfig (active site → legacy file).
+  const conn = new ConnectionManager({ loadConfig: resolveConfig, connectSftp });
   connection = conn;
   transferQueue = registerTransferQueue(context);
   transferQueue.bindConnection(conn);
-  registerRemoteExplorer(context, deps, conn, transferQueue);
+  registerRemoteExplorer(context, { loadConfig: resolveConfig, connectSftp }, conn, transferQueue);
+
+  // Site Manager — multi-site profiles driving the shared connection.
+  const sitesMod = require('./sites');
+  siteManager = sitesMod.registerSiteManager(context, {
+    connection: conn,
+    connectSftp,
+    onActiveChanged: () => vscode.commands.executeCommand('quicksync.remote.refresh'),
+  });
 
   // Phase 6: auto-sync on save (off by default). Baseline starts now so the
   // first save in "workspaceChanges" mode doesn't push the whole tree.
@@ -1042,7 +1063,7 @@ function activate(context) {
   // Phase 8: optional FileZilla-style dual-pane webview (CSP-locked).
   const dualPane = require('./dualPane');
   dualPane.registerDualPane(context, {
-    loadConfig,
+    loadConfig: resolveConfig,
     getWorkspaceRoot,
     getConnection: () => connection,
     getQueue: () => transferQueue,
