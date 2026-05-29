@@ -342,11 +342,19 @@ function makeHostVerifier(cfg) {
 
     // Enterprise mode enforces explicit pinning — no trust-on-first-use.
     if (enterpriseMode()) {
-      vscode.window.showErrorMessage(
-        `QuickSync (enterprise mode): refusing to trust the unverified host ${host}:${port}. ` +
-          `Set "hostFingerprint" (SHA256:…) in .vscode/quicksync.json and reconnect.`,
-        { modal: true }
-      );
+      const sha = 'SHA256:' + fp;
+      vscode.window
+        .showErrorMessage(
+          `QuickSync (enterprise mode): host ${host}:${port} is not pre-verified.\n\n` +
+            `The server presented:\n${sha}\n\n` +
+            `Verify this fingerprint through a trusted channel, then add it as "hostFingerprint" ` +
+            `to the site / .vscode/quicksync.json and reconnect.`,
+          { modal: true },
+          'Copy Fingerprint'
+        )
+        .then((choice) => {
+          if (choice === 'Copy Fingerprint') vscode.env.clipboard.writeText(sha);
+        });
       return cb(false);
     }
 
