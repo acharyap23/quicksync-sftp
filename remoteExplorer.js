@@ -97,17 +97,24 @@ class ConnectionManager {
 class RemoteItem extends vscode.TreeItem {
   constructor(entry, remotePath) {
     const isDir = entry.type === 'd';
-    super(
-      entry.name,
-      isDir ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
-    );
+    // FileZilla-style navigation: folders are NOT collapsible. Clicking
+    // a folder enters it (replaces current view via
+    // `quicksync.remote.enterDir`). Multi-select still picks up the
+    // folder for context-menu actions like Download / Upload Here.
+    super(entry.name, vscode.TreeItemCollapsibleState.None);
     this.entry = entry;
     this.remotePath = remotePath; // full POSIX path on the server
     this.isDir = isDir;
     this.contextValue = isDir ? 'quicksyncDir' : 'quicksyncFile';
     this.resourceUri = vscode.Uri.parse('quicksync-remote:' + remotePath); // drives file icons
     this.iconPath = isDir ? vscode.ThemeIcon.Folder : vscode.ThemeIcon.File;
-    if (!isDir) {
+    if (isDir) {
+      this.command = {
+        command: 'quicksync.remote.enterDir',
+        title: 'Enter Folder',
+        arguments: [this],
+      };
+    } else {
       this.description = formatSize(entry.size);
       this.command = {
         command: 'quicksync.remote.openFile',
@@ -115,6 +122,25 @@ class RemoteItem extends vscode.TreeItem {
         arguments: [this],
       };
     }
+  }
+}
+
+/**
+ * Special row that navigates up one level. Always sits at the top of
+ * the list unless we're already at the configured base `remotePath`.
+ */
+class ParentNavItem extends vscode.TreeItem {
+  constructor(currentDir, baseDir) {
+    super('..', vscode.TreeItemCollapsibleState.None);
+    this.description = POSIX.dirname(currentDir);
+    this.iconPath = new vscode.ThemeIcon('arrow-up');
+    this.contextValue = 'quicksyncParent'; // hides regular file/dir context menus
+    this.isParentNav = true;
+    this.command = {
+      command: 'quicksync.remote.goUp',
+      title: 'Go Up',
+      arguments: [],
+    };
   }
 }
 
@@ -135,10 +161,47 @@ class RemoteTreeProvider {
     this.conn = conn;
     this._onDidChangeTreeData = new vscode.EventEmitter();
     this.onDidChangeTreeData = this._onDidChangeTreeData.event;
+    /**
+     * FileZilla-style: the tree always shows the contents of ONE
+     * directory at a time. `currentDir` tracks where we are; null
+     * means "use cfg.remotePath" (the configured root on the server).
+     * `enterDir` / `goUp` mutate this and `refresh()` re-renders.
+     */
+    this._currentDir = null;
   }
 
   refresh() {
     this._onDidChangeTreeData.fire();
+  }
+
+  /** Absolute POSIX path of the directory currently shown. */
+  getCurrentDir() {
+    const base = (this.conn.cfg && this.conn.cfg.remotePath) || '/';
+    return (this._currentDir || base).replace(/\\/g, '/');
+  }
+
+  /** Configured root on the server. Used to clamp goUp(). */
+  getBaseDir() {
+    return ((this.conn.cfg && this.conn.cfg.remotePath) || '/').replace(/\\/g, '/');
+  }
+
+  /** Navigate into `dir` (absolute POSIX path). */
+  enterDir(dir) {
+    if (!dir) return;
+    this._currentDir = dir;
+    this.refresh();
+  }
+
+  /** Navigate to the parent of `currentDir`, clamped at the configured base. */
+  goUp() {
+    const cur = this.getCurrentDir();
+    const base = this.getBaseDir();
+    if (cur === base || cur === '/') return; // already at the root
+    const parent = POSIX.dirname(cur);
+    // Clamp: never go above the configured remotePath.
+    const allowed = parent === base || parent.startsWith(base + '/') || parent.startsWith(base);
+    this._currentDir = allowed ? parent : base;
+    this.refresh();
   }
 
   getTreeItem(el) {
@@ -161,6 +224,12 @@ class RemoteTreeProvider {
       item.iconPath = new vscode.ThemeIcon('plug');
       return [item];
     }
+
+    // FileZilla-style: we only return contents of the *current* directory.
+    // Folders are non-collapsible (no nested tree), so `element` is only
+    // ever non-null if some legacy caller tries to expand — return [] to be safe.
+    if (element) return [];
+
     let sftp;
     try {
       sftp = await this.conn.getClient();
@@ -168,13 +237,18 @@ class RemoteTreeProvider {
       return [];
     }
 
-    const dir = element ? element.remotePath : (this.conn.cfg && this.conn.cfg.remotePath ? this.conn.cfg.remotePath : '/').replace(/\\/g, '/');
+    const dir = this.getCurrentDir();
     try {
       const list = await sftp.list(dir);
-      return list
+      const items = list
         .filter((e) => e.type === 'd' || e.type === '-') // skip symlinks/specials for safety
         .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'd' ? -1 : 1))
         .map((e) => new RemoteItem(e, POSIX.join(dir, e.name)));
+      // Prepend a `..` row unless we're already at the configured root.
+      if (dir !== this.getBaseDir() && dir !== '/') {
+        return [new ParentNavItem(dir, this.getBaseDir()), ...items];
+      }
+      return items;
     } catch (err) {
       vscode.window.showErrorMessage(`QuickSync: cannot list ${dir}.`);
       return [];
@@ -207,12 +281,47 @@ function registerRemoteExplorer(context, deps, conn, queue) {
   const view = vscode.window.createTreeView('quicksyncRemote', {
     treeDataProvider: provider,
     canSelectMany: true, // multi-select (Phase 2 builds on this)
-    showCollapseAll: true,
+    // FileZilla-style: folders are flat, so the global "collapse all"
+    // button has nothing to do. Hide it to avoid confusion.
+    showCollapseAll: false,
   });
   context.subscriptions.push(view);
 
+  // Keep the view title in sync with the current directory so users
+  // always know where they are. Path is relative to the configured
+  // base remotePath where possible.
+  const updateViewTitle = () => {
+    if (!conn.isConnected()) {
+      view.description = '';
+      return;
+    }
+    const cur = provider.getCurrentDir();
+    const base = provider.getBaseDir();
+    if (cur === base) {
+      view.description = '/';
+      return;
+    }
+    const rel = cur.startsWith(base) ? cur.slice(base.length) : cur;
+    view.description = rel.startsWith('/') ? rel : '/' + rel;
+  };
+  updateViewTitle();
+  // Refresh the title whenever the tree refreshes (cheap, fires on every nav).
+  context.subscriptions.push(provider.onDidChangeTreeData(updateViewTitle));
+
   const reg = (id, fn) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, fn));
+
+  // FileZilla-style navigation commands.
+  reg('quicksync.remote.enterDir', (item) => {
+    if (!item || !item.remotePath) return;
+    provider.enterDir(item.remotePath);
+  });
+  reg('quicksync.remote.goUp', () => {
+    provider.goUp();
+  });
+  reg('quicksync.remote.goHome', () => {
+    provider.enterDir(provider.getBaseDir());
+  });
 
   reg('quicksync.remote.connect', async () => {
     if (!vscode.workspace.isTrusted) {
@@ -357,6 +466,11 @@ function registerRemoteExplorer(context, deps, conn, queue) {
     });
     if (!dest || !dest[0]) return;
     const target = dest[0].fsPath;
+    // Overwrite confirmation if the target already exists locally.
+    if (fs.existsSync(path.join(target, item.entry.name))) {
+      if (!(await confirm(`"${item.entry.name}" already exists in the target folder and will be overwritten. Continue?`, 'Overwrite')))
+        return;
+    }
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: `Downloading ${item.entry.name}` },
       async () => {
@@ -382,6 +496,24 @@ function registerRemoteExplorer(context, deps, conn, queue) {
     const picks = await vscode.window.showOpenDialog({ canSelectMany: true, openLabel: 'Upload' });
     if (!picks || picks.length === 0) return;
     if (enterpriseMode() && !(await confirm(`Upload ${picks.length} file(s) to ${item.remotePath}?`, 'Upload')))
+      return;
+    // Overwrite confirmation — count picks that already exist on the server.
+    let upSftp;
+    try {
+      upSftp = await conn.getClient();
+    } catch {
+      vscode.window.showErrorMessage('QuickSync: not connected.');
+      return;
+    }
+    let overwrites = 0;
+    for (const p of picks) {
+      try {
+        if (await upSftp.exists(POSIX.join(item.remotePath, path.basename(p.fsPath)))) overwrites++;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (overwrites > 0 && !(await confirm(`${overwrites} of ${picks.length} file(s) already exist on the server and will be overwritten. Continue?`, 'Overwrite')))
       return;
     if (queue) {
       for (const p of picks) {

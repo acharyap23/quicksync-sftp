@@ -33,18 +33,20 @@ input, button {
 button { cursor: pointer; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; }
 button.secondary { background: transparent; color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); }
 button:hover { opacity: .9; }
-.list { flex: 1; overflow: auto; margin: 0; padding: 4px 0; }
-.list, .list ul { list-style: none; }
-.list li { margin: 0; padding: 0; }
-ul.children { margin: 0; padding-left: 14px; }
-.row {
-  display: flex; align-items: center; gap: 2px;
-  padding: 2px 8px; cursor: default; white-space: nowrap; user-select: none;
+.tbwrap { flex: 1; overflow: auto; }
+table.flist { width: 100%; border-collapse: collapse; }
+.flist th, .flist td { text-align: left; padding: 2px 8px; white-space: nowrap; font-size: 12px; user-select: none; }
+.flist thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--vscode-editor-background);
+  border-bottom: 1px solid var(--vscode-panel-border);
 }
-.row:hover { background: var(--vscode-list-hoverBackground); }
-.row.sel { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-.tog { width: 1.1em; flex: 0 0 auto; text-align: center; opacity: .7; }
-.ic { width: 1.3em; flex: 0 0 auto; opacity: .9; }
+.flist tbody tr { cursor: default; }
+.flist tbody tr:hover { background: var(--vscode-list-hoverBackground); }
+.flist tbody tr.sel { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.ic { display: inline-block; width: 1.3em; opacity: .9; }
+.col-size, .col-mtime, .col-perm { text-align: right; opacity: .85; }
+.col-type, .col-owner { opacity: .85; }
 .actions { padding: 6px 8px; display: flex; gap: 8px; border-top: 1px solid var(--vscode-panel-border); }
 .log {
   height: 22%; min-height: 80px; overflow: auto; border-top: 1px solid var(--vscode-panel-border);
