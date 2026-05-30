@@ -189,7 +189,14 @@ function registerDualPane(context, deps) {
     if (!remoteInside(base, remoteDir)) return logToView('Refused: remote target outside the deployment root.');
 
     const paths = Array.isArray(m.localPaths) ? m.localPaths : [];
-    let queued = 0;
+    const conn = deps.getConnection();
+    let sftp;
+    try {
+      sftp = await conn.getClient();
+    } catch {
+      return logToView('Not connected.');
+    }
+    const toEnqueue = [];
     let skipped = 0;
     for (const lp of paths) {
       if (typeof lp !== 'string') continue;
@@ -225,7 +232,31 @@ function registerDualPane(context, deps) {
           continue;
         }
       }
-      queue.enqueue(full, POSIX.join(remoteDir, name), name);
+      toEnqueue.push({ full, remote: POSIX.join(remoteDir, name), name });
+    }
+    // Overwrite confirmation — how many targets already exist on the server?
+    let overwrites = 0;
+    for (const t of toEnqueue) {
+      try {
+        if (await sftp.exists(t.remote)) overwrites++;
+      } catch {
+        /* treat as not-existing */
+      }
+    }
+    if (overwrites > 0) {
+      const ok = await vscode.window.showWarningMessage(
+        `${overwrites} of ${toEnqueue.length} file(s) already exist on the server and will be overwritten. Continue?`,
+        { modal: true },
+        'Overwrite'
+      );
+      if (ok !== 'Overwrite') {
+        logToView('Upload cancelled.');
+        return;
+      }
+    }
+    let queued = 0;
+    for (const t of toEnqueue) {
+      queue.enqueue(t.full, t.remote, t.name);
       queued++;
     }
     logToView(`Queued ${queued} upload(s)${skipped ? `, skipped ${skipped}` : ''}. See QuickSync ▸ Transfers.`);
@@ -247,7 +278,7 @@ function registerDualPane(context, deps) {
     } catch {
       return logToView('Not connected.');
     }
-    let done = 0;
+    const valid = [];
     for (const rp of paths) {
       if (typeof rp !== 'string') continue;
       const norm = rp.replace(/\\/g, '/');
@@ -257,12 +288,29 @@ function registerDualPane(context, deps) {
       }
       const dest = path.join(localDir, POSIX.basename(norm));
       if (!localInside(root, dest)) continue;
+      valid.push({ norm, dest });
+    }
+    // Overwrite confirmation — how many local targets already exist?
+    const overwrites = valid.filter((v) => fs.existsSync(v.dest)).length;
+    if (overwrites > 0) {
+      const ok = await vscode.window.showWarningMessage(
+        `${overwrites} of ${valid.length} file(s) already exist locally and will be overwritten. Continue?`,
+        { modal: true },
+        'Overwrite'
+      );
+      if (ok !== 'Overwrite') {
+        logToView('Download cancelled.');
+        return;
+      }
+    }
+    let done = 0;
+    for (const v of valid) {
       try {
-        await sftp.fastGet(norm, dest);
+        await sftp.fastGet(v.norm, v.dest);
         done++;
-        logToView('Downloaded ' + POSIX.basename(norm));
+        logToView('Downloaded ' + POSIX.basename(v.norm));
       } catch {
-        logToView('Download failed: ' + norm);
+        logToView('Download failed: ' + v.norm);
       }
     }
     if (done) sendLocal(localDir);
