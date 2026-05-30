@@ -197,6 +197,9 @@
       { "command": "quicksync.sites.connectWorkspace", "title": "Connect (Workspace Config)", "category": "QuickSync", "icon": "$(plug)" },
       { "command": "quicksync.sites.refresh", "title": "Refresh Sites", "category": "QuickSync", "icon": "$(refresh)" },
       { "command": "quicksync.remote.restore", "title": "Restore from Backup", "category": "QuickSync", "icon": "$(history)" },
+      { "command": "quicksync.remote.enterDir", "title": "Enter Folder", "category": "QuickSync", "icon": "$(folder-opened)" },
+      { "command": "quicksync.remote.goUp", "title": "Go Up", "category": "QuickSync", "icon": "$(arrow-up)" },
+      { "command": "quicksync.remote.goHome", "title": "Go to Root", "category": "QuickSync", "icon": "$(home)" },
       { "command": "quicksync.openAuditLog", "title": "Open Audit Log", "category": "QuickSync" }
     ],
     "viewsContainers": {
@@ -244,8 +247,10 @@
         { "command": "quicksync.sites.disconnect", "when": "view == quicksyncSites && quicksync.connected", "group": "navigation@4" },
         { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote && !quicksync.connected", "group": "navigation@1" },
         { "command": "quicksync.remote.disconnect", "when": "view == quicksyncRemote && quicksync.connected", "group": "navigation@1" },
-        { "command": "quicksync.remote.refresh", "when": "view == quicksyncRemote", "group": "navigation@2" },
-        { "command": "quicksync.remote.newFolder", "when": "view == quicksyncRemote && quicksync.connected", "group": "navigation@3" },
+        { "command": "quicksync.remote.goHome", "when": "view == quicksyncRemote && quicksync.connected", "group": "navigation@2" },
+        { "command": "quicksync.remote.goUp", "when": "view == quicksyncRemote && quicksync.connected", "group": "navigation@3" },
+        { "command": "quicksync.remote.refresh", "when": "view == quicksyncRemote", "group": "navigation@4" },
+        { "command": "quicksync.remote.newFolder", "when": "view == quicksyncRemote && quicksync.connected", "group": "navigation@5" },
         { "command": "quicksync.openDualPane", "when": "view == quicksyncRemote", "group": "navigation@4" },
         { "command": "quicksync.queue.retryAll", "when": "view == quicksyncQueue", "group": "navigation@1" },
         { "command": "quicksync.queue.clear", "when": "view == quicksyncQueue", "group": "navigation@2" }
