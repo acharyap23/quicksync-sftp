@@ -129,7 +129,7 @@ function registerDualPane(context, deps) {
     try {
       const entries = fs.readdirSync(target, { withFileTypes: true })
         .filter((e) => e.isFile() || e.isDirectory()) // skip symlinks/specials
-        .map((e) => ({ name: e.name, type: e.isDirectory() ? 'd' : '-' }))
+        .map((e) => ({ name: e.name, type: e.isDirectory() ? 'd' : '-', path: path.join(target, e.name) }))
         .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'd' ? -1 : 1));
       post({ type: 'local', path: target, entries });
     } catch {
@@ -149,7 +149,7 @@ function registerDualPane(context, deps) {
       const list = await sftp.list(target);
       const entries = list
         .filter((e) => e.type === 'd' || e.type === '-')
-        .map((e) => ({ name: e.name, type: e.type }))
+        .map((e) => ({ name: e.name, type: e.type, path: POSIX.join(target, e.name) }))
         .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'd' ? -1 : 1));
       post({ type: 'remote', path: target, entries });
     } catch (err) {
