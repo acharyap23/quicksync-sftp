@@ -43,7 +43,8 @@ ul.children { margin: 0; padding-left: 14px; }
 }
 .row:hover { background: var(--vscode-list-hoverBackground); }
 .row.sel { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
-.tog { width: 1.1em; flex: 0 0 auto; text-align: center; opacity: .7; }
+.tog { width: 1.1em; flex: 0 0 auto; text-align: center; opacity: .7; cursor: pointer; }
+.tog:hover { opacity: 1; }
 .ic { width: 1.3em; flex: 0 0 auto; opacity: .9; }
 .actions { padding: 6px 8px; display: flex; gap: 8px; border-top: 1px solid var(--vscode-panel-border); }
 .log {

@@ -62,11 +62,8 @@
     }
   }
 
-  function onRowClick(side, row) {
-    if (row.dataset.kind === 'file') {
-      toggleSel(side, row);
-      return;
-    }
+  // Chevron only: expand/collapse a folder (lazy-loading its children).
+  function toggleExpand(side, row) {
     const li = row.parentElement;
     const ul = li.querySelector(':scope > ul.children');
     if (!ul) return;
@@ -97,7 +94,15 @@
   function wire(side) {
     $(side + 'List').addEventListener('click', (ev) => {
       const row = ev.target.closest('.row');
-      if (row && row.dataset.side === side) onRowClick(side, row);
+      if (!row || row.dataset.side !== side) return;
+      // Clicking the chevron expands/collapses; clicking anywhere else on the
+      // row selects it — files AND folders (so folders can be up/downloaded).
+      const tog = ev.target.closest('.tog');
+      if (tog && row.dataset.kind === 'dir') {
+        toggleExpand(side, row);
+        return;
+      }
+      toggleSel(side, row);
     });
     $(side + 'Filter').addEventListener('input', () => applyFilter(side));
     $(side + 'Refresh').addEventListener('click', () => {
@@ -140,6 +145,20 @@
 
   window.addEventListener('message', (ev) => {
     const m = ev.data || {};
+    if (m.type === 'remoteCleared') {
+      state.remote.root = '';
+      state.remote.sel.clear();
+      $('remotePath').textContent = '(disconnected)';
+      const ul = $('remoteList');
+      ul.textContent = '';
+      const li = document.createElement('li');
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.textContent = 'Not connected';
+      li.appendChild(row);
+      ul.appendChild(li);
+      return;
+    }
     if (m.type === 'local' || m.type === 'remote') {
       const side = m.type;
       const path = typeof m.path === 'string' ? m.path : '';

@@ -32,6 +32,23 @@ function remoteBase(cfg) {
   return cfg.remotePath.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
 }
 
+// Recursively collect files under `dir` (within the workspace), skipping symlinks.
+function walkLocalFiles(dir, root, out) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (e.isSymbolicLink()) continue;
+    const full = path.join(dir, e.name);
+    if (!localInside(root, full)) continue;
+    if (e.isDirectory()) walkLocalFiles(full, root, out);
+    else if (e.isFile()) out.push(full);
+  }
+}
+
 function getHtml(webview, mediaUri, n) {
   const css = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'dualpane.css'));
   const js = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'dualpane.js'));
@@ -138,6 +155,12 @@ function registerDualPane(context, deps) {
   }
 
   async function sendRemote(dir) {
+    // Never auto-(re)connect from passive rendering. If disconnected, clear the
+    // remote pane instead of opening a connection.
+    if (!deps.getConnection().isConnected()) {
+      post({ type: 'remoteCleared' });
+      return;
+    }
     const cfg = await deps.loadConfig();
     if (!cfg) return logToView('No QuickSync config found.');
     const base = remoteBase(cfg);
@@ -196,7 +219,9 @@ function registerDualPane(context, deps) {
     } catch {
       return logToView('Not connected.');
     }
-    const toEnqueue = [];
+    // Expand selected directories into their files (recursive), preserving the
+    // folder structure under remoteDir; selected files map to remoteDir/name.
+    const candidates = [];
     let skipped = 0;
     for (const lp of paths) {
       if (typeof lp !== 'string') continue;
@@ -211,19 +236,29 @@ function registerDualPane(context, deps) {
       } catch {
         continue;
       }
-      if (!st.isFile()) continue;
-      const name = path.basename(full);
-      // Hard deny-list (name-based) — never upload secrets.
-      if (deps.shouldIgnore(name, cfg.ignore)) {
+      if (st.isFile()) {
+        candidates.push({ full, remote: POSIX.join(remoteDir, path.basename(full)), name: path.basename(full) });
+      } else if (st.isDirectory()) {
+        const parent = path.dirname(full);
+        const files = [];
+        walkLocalFiles(full, root, files);
+        for (const f of files) {
+          const rel = path.relative(parent, f).split(path.sep).join('/');
+          candidates.push({ full: f, remote: POSIX.join(remoteDir, rel), name: path.basename(f) });
+        }
+      }
+    }
+    // Deny-list (never upload secrets) + warn-level safety, per file.
+    const toEnqueue = [];
+    for (const c of candidates) {
+      if (deps.shouldIgnore(c.name, cfg.ignore)) {
         skipped++;
-        logToView(`Skipped ${name} (ignored / sensitive).`);
         continue;
       }
-      // Warn-level safety classification.
-      const flagged = deps.classify([{ rel: name, full }]);
+      const flagged = deps.classify([{ rel: c.name, full: c.full }]);
       if (flagged.length) {
         const ok = await vscode.window.showWarningMessage(
-          `Upload potentially sensitive file "${name}" (${flagged[0].reason})?`,
+          `Upload potentially sensitive file "${c.name}" (${flagged[0].reason})?`,
           { modal: true },
           'Upload'
         );
@@ -232,8 +267,9 @@ function registerDualPane(context, deps) {
           continue;
         }
       }
-      toEnqueue.push({ full, remote: POSIX.join(remoteDir, name), name });
+      toEnqueue.push(c);
     }
+    if (toEnqueue.length === 0) return logToView('Nothing to upload.');
     // Overwrite confirmation — how many targets already exist on the server?
     let overwrites = 0;
     for (const t of toEnqueue) {
@@ -252,6 +288,15 @@ function registerDualPane(context, deps) {
       if (ok !== 'Overwrite') {
         logToView('Upload cancelled.');
         return;
+      }
+    }
+    // Ensure remote subdirectories exist (folder uploads create nested paths).
+    const dirs = [...new Set(toEnqueue.map((t) => POSIX.dirname(t.remote)))];
+    for (const d of dirs) {
+      try {
+        if (!(await sftp.exists(d))) await sftp.mkdir(d, true);
+      } catch {
+        /* best effort — upload will surface a per-file failure */
       }
     }
     let queued = 0;
@@ -288,13 +333,20 @@ function registerDualPane(context, deps) {
       }
       const dest = path.join(localDir, POSIX.basename(norm));
       if (!localInside(root, dest)) continue;
-      valid.push({ norm, dest });
+      let isDir = false;
+      try {
+        const stt = await sftp.stat(norm);
+        isDir = !!stt.isDirectory;
+      } catch {
+        /* treat as file */
+      }
+      valid.push({ norm, dest, isDir });
     }
     // Overwrite confirmation — how many local targets already exist?
     const overwrites = valid.filter((v) => fs.existsSync(v.dest)).length;
     if (overwrites > 0) {
       const ok = await vscode.window.showWarningMessage(
-        `${overwrites} of ${valid.length} file(s) already exist locally and will be overwritten. Continue?`,
+        `${overwrites} of ${valid.length} item(s) already exist locally and will be overwritten. Continue?`,
         { modal: true },
         'Overwrite'
       );
@@ -306,11 +358,12 @@ function registerDualPane(context, deps) {
     let done = 0;
     for (const v of valid) {
       try {
-        await sftp.fastGet(v.norm, v.dest);
+        if (v.isDir) await sftp.downloadDir(v.norm, v.dest);
+        else await sftp.fastGet(v.norm, v.dest);
         done++;
         logToView('Downloaded ' + POSIX.basename(v.norm));
       } catch {
-        logToView('Download failed: ' + v.norm);
+        logToView('Download failed: ' + POSIX.basename(v.norm));
       }
     }
     if (done) sendLocal(localDir);
@@ -325,6 +378,16 @@ function registerDualPane(context, deps) {
       reveal();
     })
   );
+
+  // Called when the connection state changes: clear the remote pane on
+  // disconnect, re-list the root on (re)connect — only if the panel is open.
+  return {
+    onConnectionChange() {
+      if (!panel) return;
+      if (deps.getConnection().isConnected()) sendRemote();
+      else post({ type: 'remoteCleared' });
+    },
+  };
 }
 
 module.exports = { registerDualPane };

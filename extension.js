@@ -1152,10 +1152,12 @@ function activate(context) {
   const conn = new ConnectionManager({ loadConfig: resolveConfig, connectSftp });
   connection = conn;
   // Drive a context key + view refresh so Connect/Disconnect toggle by state.
+  let dualPaneHandle = null;
   const syncConnectedContext = () => {
     vscode.commands.executeCommand('setContext', 'quicksync.connected', conn.isConnected());
     vscode.commands.executeCommand('quicksync.sites.refresh');
     vscode.commands.executeCommand('quicksync.remote.refresh');
+    if (dualPaneHandle) dualPaneHandle.onConnectionChange();
   };
   conn.onChange = syncConnectedContext;
   vscode.commands.executeCommand('setContext', 'quicksync.connected', false);
@@ -1187,7 +1189,7 @@ function activate(context) {
 
   // Phase 8: optional FileZilla-style dual-pane webview (CSP-locked).
   const dualPane = require('./dualPane');
-  dualPane.registerDualPane(context, {
+  dualPaneHandle = dualPane.registerDualPane(context, {
     loadConfig: resolveConfig,
     getWorkspaceRoot,
     getConnection: () => connection,
