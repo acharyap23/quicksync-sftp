@@ -71,20 +71,30 @@ function getHtml(webview, mediaUri, n) {
   <div class="toolbar"><strong>QuickSync</strong><span>— local ↔ remote</span></div>
   <div class="panes">
     <section class="pane" id="localPane">
-      <h2>Local Files</h2>
+      <h2>Local site</h2>
       <div class="pathbar" id="localPath"></div>
       <input class="filter" id="localFilter" placeholder="Filter…" />
-      <ul class="list" id="localList"></ul>
+      <div class="tbwrap">
+        <table class="flist">
+          <thead><tr><th>Filename</th><th class="col-size">Size</th><th class="col-mtime">Last modified</th><th class="col-type">Type</th></tr></thead>
+          <tbody id="localList"></tbody>
+        </table>
+      </div>
       <div class="actions">
         <button id="uploadBtn">Upload →</button>
         <button class="secondary" id="localRefresh">Refresh</button>
       </div>
     </section>
     <section class="pane" id="remotePane">
-      <h2>Remote Files</h2>
+      <h2>Remote site</h2>
       <div class="pathbar" id="remotePath"></div>
       <input class="filter" id="remoteFilter" placeholder="Filter…" />
-      <ul class="list" id="remoteList"></ul>
+      <div class="tbwrap">
+        <table class="flist">
+          <thead><tr><th>Filename</th><th class="col-size">Size</th><th class="col-mtime">Last modified</th><th class="col-perm">Perms</th><th class="col-owner">Owner</th></tr></thead>
+          <tbody id="remoteList"></tbody>
+        </table>
+      </div>
       <div class="actions">
         <button id="downloadBtn">← Download</button>
         <button class="secondary" id="remoteRefresh">Refresh</button>
@@ -146,7 +156,19 @@ function registerDualPane(context, deps) {
     try {
       const entries = fs.readdirSync(target, { withFileTypes: true })
         .filter((e) => e.isFile() || e.isDirectory()) // skip symlinks/specials
-        .map((e) => ({ name: e.name, type: e.isDirectory() ? 'd' : '-', path: path.join(target, e.name) }))
+        .map((e) => {
+          const full = path.join(target, e.name);
+          let size = 0;
+          let mtime = 0;
+          try {
+            const st = fs.statSync(full);
+            size = st.size;
+            mtime = st.mtimeMs;
+          } catch {
+            /* ignore */
+          }
+          return { name: e.name, type: e.isDirectory() ? 'd' : '-', path: full, size, mtime };
+        })
         .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'd' ? -1 : 1));
       post({ type: 'local', path: target, entries });
     } catch {
@@ -172,7 +194,12 @@ function registerDualPane(context, deps) {
       const list = await sftp.list(target);
       const entries = list
         .filter((e) => e.type === 'd' || e.type === '-')
-        .map((e) => ({ name: e.name, type: e.type, path: POSIX.join(target, e.name) }))
+        .map((e) => {
+          const r = e.rights || {};
+          const perms = `${r.user || ''}${r.group || ''}${r.other || ''}`;
+          const owner = e.owner != null || e.group != null ? `${e.owner || ''} ${e.group || ''}`.trim() : '';
+          return { name: e.name, type: e.type, path: POSIX.join(target, e.name), size: e.size, mtime: e.modifyTime, perms, owner };
+        })
         .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'd' ? -1 : 1));
       post({ type: 'remote', path: target, entries });
     } catch (err) {
@@ -270,9 +297,27 @@ function registerDualPane(context, deps) {
       toEnqueue.push(c);
     }
     if (toEnqueue.length === 0) return logToView('Nothing to upload.');
+
+    // Path choice: the "matching path" mirrors the local structure under the
+    // remote ROOT; the "current folder" is the remote dir you're viewing. If
+    // they differ, ask (default = matching path).
+    const matchOf = (full) => POSIX.join(base, path.relative(root, full).split(path.sep).join('/'));
+    let mode = 'matching';
+    const c0 = toEnqueue[0];
+    if (matchOf(c0.full) !== c0.remote) {
+      const pick = await vscode.window.showInformationMessage(
+        `Upload location differs.\n\nMatching path:  ${POSIX.dirname(matchOf(c0.full))}\nCurrent folder: ${POSIX.dirname(c0.remote)}\n\nUpload to which?`,
+        { modal: true },
+        'Matching path',
+        'Current folder'
+      );
+      mode = pick === 'Current folder' ? 'current' : 'matching'; // default matching (incl. dismiss)
+    }
+    const mapped = toEnqueue.map((t) => ({ full: t.full, name: t.name, remote: mode === 'matching' ? matchOf(t.full) : t.remote }));
+
     // Overwrite confirmation — how many targets already exist on the server?
     let overwrites = 0;
-    for (const t of toEnqueue) {
+    for (const t of mapped) {
       try {
         if (await sftp.exists(t.remote)) overwrites++;
       } catch {
@@ -281,7 +326,7 @@ function registerDualPane(context, deps) {
     }
     if (overwrites > 0) {
       const ok = await vscode.window.showWarningMessage(
-        `${overwrites} of ${toEnqueue.length} file(s) already exist on the server and will be overwritten. Continue?`,
+        `${overwrites} of ${mapped.length} file(s) already exist on the server and will be overwritten. Continue?`,
         { modal: true },
         'Overwrite'
       );
@@ -291,7 +336,7 @@ function registerDualPane(context, deps) {
       }
     }
     // Ensure remote subdirectories exist (folder uploads create nested paths).
-    const dirs = [...new Set(toEnqueue.map((t) => POSIX.dirname(t.remote)))];
+    const dirs = [...new Set(mapped.map((t) => POSIX.dirname(t.remote)))];
     for (const d of dirs) {
       try {
         if (!(await sftp.exists(d))) await sftp.mkdir(d, true);
@@ -300,11 +345,11 @@ function registerDualPane(context, deps) {
       }
     }
     let queued = 0;
-    for (const t of toEnqueue) {
+    for (const t of mapped) {
       queue.enqueue(t.full, t.remote, t.name);
       queued++;
     }
-    logToView(`Queued ${queued} upload(s)${skipped ? `, skipped ${skipped}` : ''}. See QuickSync ▸ Transfers.`);
+    logToView(`Queued ${queued} upload(s)${skipped ? `, skipped ${skipped}` : ''} (${mode} path). See QuickSync ▸ Transfers.`);
     sendRemote(remoteDir);
   }
 
@@ -342,8 +387,27 @@ function registerDualPane(context, deps) {
       }
       valid.push({ norm, dest, isDir });
     }
+    if (valid.length === 0) return logToView('Nothing to download.');
+
+    // Path choice: the "matching path" mirrors the remote structure under the
+    // local workspace ROOT; the "current folder" is the local dir you're
+    // viewing. If they differ, ask (default = matching path).
+    const matchOf = (norm) => path.join(root, norm.slice(base.length).replace(/^\/+/, '').split('/').join(path.sep));
+    let mode = 'matching';
+    const v0 = valid[0];
+    if (matchOf(v0.norm) !== v0.dest) {
+      const pick = await vscode.window.showInformationMessage(
+        `Download location differs.\n\nMatching path:  ${path.dirname(matchOf(v0.norm))}\nCurrent folder: ${path.dirname(v0.dest)}\n\nDownload to which?`,
+        { modal: true },
+        'Matching path',
+        'Current folder'
+      );
+      mode = pick === 'Current folder' ? 'current' : 'matching';
+    }
+    for (const v of valid) v.target = mode === 'matching' ? matchOf(v.norm) : v.dest;
+
     // Overwrite confirmation — how many local targets already exist?
-    const overwrites = valid.filter((v) => fs.existsSync(v.dest)).length;
+    const overwrites = valid.filter((v) => fs.existsSync(v.target)).length;
     if (overwrites > 0) {
       const ok = await vscode.window.showWarningMessage(
         `${overwrites} of ${valid.length} item(s) already exist locally and will be overwritten. Continue?`,
@@ -358,8 +422,9 @@ function registerDualPane(context, deps) {
     let done = 0;
     for (const v of valid) {
       try {
-        if (v.isDir) await sftp.downloadDir(v.norm, v.dest);
-        else await sftp.fastGet(v.norm, v.dest);
+        fs.mkdirSync(path.dirname(v.target), { recursive: true });
+        if (v.isDir) await sftp.downloadDir(v.norm, v.target);
+        else await sftp.fastGet(v.norm, v.target);
         done++;
         logToView('Downloaded ' + POSIX.basename(v.norm));
       } catch {
