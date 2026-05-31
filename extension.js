@@ -142,18 +142,46 @@ async function resolveConfig() {
   return cfg;
 }
 
-// "Sync Changed Files" baseline — persisted in workspaceState so it survives
-// closing/reopening VS Code (otherwise a restart re-uploads everything).
-// Keyed per workspace (workspaceState is already workspace-scoped) + target,
-// so each project/server keeps its own last-sync time.
-function lastSyncKey(cfg) {
-  return `quicksync.lastSync:${cfg.host}:${cfg.port || 22}:${cfg.remotePath}`;
+// Per-file upload manifest (rel → mtime), persisted in workspaceState per
+// workspace + target. This makes "Sync Changed Files" RESUMABLE: each file is
+// recorded as soon as it uploads, so a partial/interrupted sync isn't wasted —
+// a re-run uploads only what's still changed/unsent. Writes are batched
+// (debounced) so a big sync doesn't trigger thousands of disk writes.
+let _mfCache = null;
+let _mfKey = null;
+let _mfDirty = false;
+let _mfTimer = null;
+function manifestKey(cfg) {
+  return `quicksync.manifest:${cfg.host}:${cfg.port || 22}:${cfg.remotePath}`;
 }
-function getLastSyncTime(cfg) {
-  return extContext.workspaceState.get(lastSyncKey(cfg)) || 0;
+function getManifest(cfg) {
+  const k = manifestKey(cfg);
+  if (_mfKey !== k) {
+    _mfKey = k;
+    _mfCache = extContext.workspaceState.get(k) || {};
+  }
+  return _mfCache;
 }
-function setLastSyncTime(cfg, ts) {
-  return extContext.workspaceState.update(lastSyncKey(cfg), ts);
+function isChangedFile(cfg, rel, mtime) {
+  const m = getManifest(cfg);
+  return !m[rel] || mtime > m[rel];
+}
+function markSynced(cfg, rel, mtime) {
+  const m = getManifest(cfg);
+  m[rel] = mtime;
+  _mfDirty = true;
+  if (!_mfTimer) _mfTimer = setTimeout(persistManifest, 1500);
+}
+async function persistManifest() {
+  _mfTimer = null;
+  if (_mfDirty && _mfKey) {
+    _mfDirty = false;
+    try {
+      await extContext.workspaceState.update(_mfKey, _mfCache);
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 // Side-effect-free read of the workspace quicksync.json "ignore" array.
@@ -677,7 +705,6 @@ async function runSync(onlyChanged) {
       return;
     }
 
-    const lastSyncTime = getLastSyncTime(cfg); // persisted across restarts
     const root = getWorkspaceRoot();
     const allFiles = await walk(root, root, cfg.ignore || []);
     if (allFiles.length >= MAX_FILES) {
@@ -686,18 +713,18 @@ async function runSync(onlyChanged) {
       );
     }
 
-    let files = allFiles;
-    if (onlyChanged && lastSyncTime > 0) {
-      files = allFiles.filter((f) => f.mtime > lastSyncTime);
-    }
+    const manifestEmpty = Object.keys(getManifest(cfg)).length === 0;
+    // "Changed" = modified since recorded in the manifest (resumable across
+    // restarts and partial syncs). "All" uploads everything.
+    const files = onlyChanged ? allFiles.filter((f) => isChangedFile(cfg, f.rel, f.mtime)) : allFiles;
 
     if (files.length === 0) {
-      vscode.window.showInformationMessage('QuickSync: nothing to upload.');
+      vscode.window.showInformationMessage('QuickSync: nothing to upload — everything is up to date.');
       return;
     }
 
-    // H-4: explicit confirmation before mass upload / overwrite.
-    const fullSync = !onlyChanged || lastSyncTime === 0;
+    // H-4: explicit confirmation before a full/first mass overwrite.
+    const fullSync = !onlyChanged || manifestEmpty;
     if (fullSync) {
       const ok = await vscode.window.showWarningMessage(
         `QuickSync will upload ${files.length} file(s) to ${cfg.username}@${cfg.host}:${cfg.remotePath} and OVERWRITE existing remote files. Continue?`,
@@ -707,39 +734,11 @@ async function runSync(onlyChanged) {
       if (ok !== 'Upload') return;
     }
 
-    const startedAt = Date.now();
-    setStatusBar('$(sync~spin) Syncing…', 'Sync in progress');
-
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: `QuickSync: uploading ${files.length} file(s)`,
-        cancellable: true,
-      },
-      async (progress, token) => {
-        try {
-          const result = await uploadFiles(cfg, files, progress, token);
-          // M-3: only advance baseline if nothing failed; otherwise keep failed
-          // files eligible for the next "changed" sync.
-          if (result.failed === 0) {
-            await setLastSyncTime(cfg, startedAt);
-            vscode.window.showInformationMessage(`QuickSync: uploaded ${result.uploaded} file(s) ✓`);
-          } else {
-            vscode.window.showWarningMessage(
-              `QuickSync: ${result.uploaded} uploaded, ${result.failed} failed. ${result.errors[0] || ''}`
-            );
-          }
-        } catch (err) {
-          // L-1: surface a generic message; full detail only to the dev console.
-          console.error('QuickSync error:', err);
-          vscode.window.showErrorMessage('QuickSync failed: could not complete the sync (see Developer Tools console).');
-        } finally {
-          resetStatusBar();
-        }
-      }
-    );
+    // Route through the parallel transfer queue (fast + resilient + resumable);
+    // each file is recorded in the manifest as it completes.
+    await enqueueEntries(cfg, files, { confirm: false });
   } finally {
-    isSyncing = false; // released on every path: early return, error, or success
+    isSyncing = false; // released after enqueueing; uploads continue in the queue
   }
 }
 
@@ -838,9 +837,12 @@ async function reviewSensitive(files) {
   return kept.filter((f) => !flaggedSet.has(f.rel)); // Skip Sensitive + Always Ignore
 }
 
-// Push entries onto the shared transfer queue (Phase 3). Remote paths mirror
-// the workspace layout under cfg.remotePath.
-async function enqueueEntries(cfg, files, quiet) {
+// Push entries onto the shared transfer queue (Phase 3) — PARALLEL, resilient,
+// resumable. Remote paths mirror the workspace layout under cfg.remotePath.
+// opts: { quiet, confirm }. Each completed file is recorded in the manifest so
+// an interrupted batch can be resumed (only remaining files re-upload).
+async function enqueueEntries(cfg, files, opts = {}) {
+  const quiet = !!opts.quiet;
   if (files.length === 0) {
     if (!quiet) vscode.window.showInformationMessage('QuickSync: nothing to upload.');
     return;
@@ -849,8 +851,8 @@ async function enqueueEntries(cfg, files, quiet) {
     vscode.window.showErrorMessage('QuickSync: transfer queue unavailable.');
     return;
   }
-  // Enterprise mode: require an explicit confirmation for manual uploads.
-  if (!quiet && enterpriseMode()) {
+  const confirm = opts.confirm !== undefined ? opts.confirm : !quiet;
+  if (confirm && enterpriseMode()) {
     const ok = await vscode.window.showWarningMessage(
       `Upload ${files.length} file(s) to ${cfg.username}@${cfg.host}:${cfg.remotePath} (overwrites existing)?`,
       { modal: true },
@@ -859,13 +861,34 @@ async function enqueueEntries(cfg, files, quiet) {
     if (ok !== 'Upload') return;
   }
   const base = cfg.remotePath.replace(/\\/g, '/').replace(/\/$/, '');
+  // Pre-create remote directories once (the queue's per-file upload does not
+  // create parents). Best-effort over a single connection.
+  try {
+    if (connection) {
+      const sftp = await connection.getClient();
+      const dirs = [...new Set(files.map((f) => path.posix.dirname(base + '/' + f.rel.split(path.sep).join('/'))))];
+      for (const d of dirs) {
+        try {
+          if (!(await sftp.exists(d))) await sftp.mkdir(d, true);
+        } catch {
+          /* per-file upload will surface a real failure */
+        }
+      }
+    }
+  } catch {
+    /* dirs best-effort */
+  }
   for (const f of files) {
-    const remoteRel = f.rel.split(path.sep).join('/');
-    transferQueue.enqueue(f.full, base + '/' + remoteRel, f.rel);
+    const remote = base + '/' + f.rel.split(path.sep).join('/');
+    transferQueue.enqueue(f.full, remote, f.rel, {
+      onComplete: (state) => {
+        if (state === 'Completed') markSynced(cfg, f.rel, f.mtime);
+      },
+    });
   }
   if (!quiet) {
     vscode.window.showInformationMessage(
-      `QuickSync: queued ${files.length} file(s) — see the QuickSync ▸ Transfers view.`
+      `QuickSync: queued ${files.length} file(s) — uploading in parallel (QuickSync ▸ Transfers).`
     );
   }
 }
@@ -940,7 +963,7 @@ async function flushAutoSync() {
   files = files.filter((f) => !ignored.has(f.rel));
   const flagged = new Set(safety.classify(files).map((x) => x.rel));
   files = files.filter((f) => !flagged.has(f.rel));
-  await enqueueEntries(cfg, files, /* quiet */ true);
+  await enqueueEntries(cfg, files, { quiet: true });
 }
 
 // Turn a set of URIs into upload entries: files become entries (skipping

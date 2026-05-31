@@ -77,6 +77,15 @@ class ClientPool {
   release(c) {
     if (c) this.free.push(c);
   }
+  async evict(c) {
+    this.clients = this.clients.filter((x) => x !== c);
+    this.free = this.free.filter((x) => x !== c);
+    try {
+      await c.end();
+    } catch {
+      /* already gone */
+    }
+  }
   async closeAll() {
     const cs = this.clients;
     this.clients = [];
@@ -109,11 +118,13 @@ class TransferQueue {
     return Math.min(8, Math.max(1, Number(n) || 1));
   }
 
-  enqueue(localFull, remotePath, label) {
+  enqueue(localFull, remotePath, label, opts) {
     // Dedupe: skip if an active item already targets this remote path.
     const dup = this.items.find((i) => i.remotePath === remotePath && ACTIVE_STATES.includes(i.state));
     if (dup) return dup;
     const item = new TransferItem(++this.seq, localFull, remotePath, label);
+    item.onComplete = opts && opts.onComplete;
+    item.attempts = 0;
     this.items.push(item);
     this.onChange();
     this._pump();
@@ -233,10 +244,28 @@ class TransferQueue {
         this.audit.log('upload', { remotePath: item.remotePath, bytes: item.total, result: 'ok' });
       }
     } catch (err) {
+      const msg = err && err.message ? err.message : 'upload failed';
+      // A dropped/dead connection? Evict the client so a fresh one is created.
+      const connErr = /econn|closed|timed?\s*out|not connected|channel|disconnect|ENOTFOUND|EPIPE|destroyed|ECONNRESET|handshake/i.test(msg);
+      if (connErr && sftp && this.pool) {
+        await this.pool.evict(sftp);
+        sftp = null;
+      }
+      // Retry transient failures (esp. connection drops) before giving up.
+      if ((item.attempts || 0) < 2) {
+        item.attempts = (item.attempts || 0) + 1;
+        item.state = STATE.QUEUED;
+        item.error = null;
+        item.transferred = 0;
+        if (sftp) this.pool.release(sftp);
+        sftp = null;
+        this.onChange();
+        setTimeout(() => this._pump(), connErr ? 600 : 150);
+        return; // not terminal — don't notify onComplete yet
+      }
       item.state = STATE.FAILED;
-      item.error = err && err.message ? err.message : 'upload failed';
+      item.error = msg;
       this.audit.log('upload', { remotePath: item.remotePath, result: 'failed' });
-      // Clean up any partial temp file on the same connection.
       if (sftp) {
         try {
           await sftp.delete(tmp);
@@ -246,6 +275,15 @@ class TransferQueue {
       }
     } finally {
       if (sftp) this.pool.release(sftp);
+    }
+    // Notify once on a terminal state (used to record the sync manifest).
+    if (item.onComplete && [STATE.COMPLETED, STATE.FAILED, STATE.CANCELLED].includes(item.state) && !item._notified) {
+      item._notified = true;
+      try {
+        item.onComplete(item.state);
+      } catch {
+        /* ignore */
+      }
     }
     this.onChange();
   }
