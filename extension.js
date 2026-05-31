@@ -6,7 +6,6 @@ const crypto = require('crypto');
 const SftpClient = require('ssh2-sftp-client');
 
 let statusBarItem;
-let lastSyncTime = 0;
 let isSyncing = false;          // M-2: single-flight lock
 let extContext = null;          // for SecretStorage + globalState
 let transferQueue = null;       // Phase 3: shared upload queue
@@ -141,6 +140,20 @@ async function resolveConfig() {
     cfg.ignore = [...merged];
   }
   return cfg;
+}
+
+// "Sync Changed Files" baseline — persisted in workspaceState so it survives
+// closing/reopening VS Code (otherwise a restart re-uploads everything).
+// Keyed per workspace (workspaceState is already workspace-scoped) + target,
+// so each project/server keeps its own last-sync time.
+function lastSyncKey(cfg) {
+  return `quicksync.lastSync:${cfg.host}:${cfg.port || 22}:${cfg.remotePath}`;
+}
+function getLastSyncTime(cfg) {
+  return extContext.workspaceState.get(lastSyncKey(cfg)) || 0;
+}
+function setLastSyncTime(cfg, ts) {
+  return extContext.workspaceState.update(lastSyncKey(cfg), ts);
 }
 
 // Side-effect-free read of the workspace quicksync.json "ignore" array.
@@ -649,6 +662,7 @@ async function runSync(onlyChanged) {
       return;
     }
 
+    const lastSyncTime = getLastSyncTime(cfg); // persisted across restarts
     const root = getWorkspaceRoot();
     const allFiles = await walk(root, root, cfg.ignore || []);
     if (allFiles.length >= MAX_FILES) {
@@ -693,7 +707,7 @@ async function runSync(onlyChanged) {
           // M-3: only advance baseline if nothing failed; otherwise keep failed
           // files eligible for the next "changed" sync.
           if (result.failed === 0) {
-            lastSyncTime = startedAt;
+            await setLastSyncTime(cfg, startedAt);
             vscode.window.showInformationMessage(`QuickSync: uploaded ${result.uploaded} file(s) ✓`);
           } else {
             vscode.window.showWarningMessage(
