@@ -337,6 +337,11 @@
           "type": "boolean",
           "default": false,
           "description": "Append a local, redacted audit log of connect/upload/download/delete/rename/backup/restore actions (no secrets). Always on in enterprise mode."
+        },
+        "quicksync.requirePinnedFingerprint": {
+          "type": "boolean",
+          "default": false,
+          "description": "Strictest host verification: in enterprise mode, refuse hosts without a pre-configured \"hostFingerprint\" (no interactive Trust & Pin)."
         }
       }
     },

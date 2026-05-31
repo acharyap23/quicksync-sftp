@@ -48,8 +48,11 @@ table.flist { width: 100%; border-collapse: collapse; }
 .col-size, .col-mtime, .col-perm { text-align: right; opacity: .85; }
 .col-type, .col-owner { opacity: .85; }
 .actions { padding: 6px 8px; display: flex; gap: 8px; border-top: 1px solid var(--vscode-panel-border); }
+.xfer-panel { display: flex; flex-direction: column; border-top: 1px solid var(--vscode-panel-border); max-height: 34%; }
+.xfer-head { padding: 4px 8px; font-size: 11px; text-transform: uppercase; opacity: .8; }
+.xfer-wrap { flex: 1; min-height: 70px; max-height: 160px; overflow: auto; }
 .log {
-  height: 22%; min-height: 80px; overflow: auto; border-top: 1px solid var(--vscode-panel-border);
+  height: 64px; min-height: 48px; overflow: auto; border-top: 1px solid var(--vscode-panel-border);
   font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; padding: 6px 8px; white-space: pre-wrap;
 }
 .dropping { outline: 2px dashed var(--vscode-focusBorder); outline-offset: -4px; }

@@ -374,12 +374,27 @@ function makeHostVerifier(cfg) {
       return cb(false);
     }
 
-    // Enterprise mode: no silent trust-on-first-use. Show the presented
-    // fingerprint and require an explicit, informed decision. "Trust & Pin"
-    // accepts it for this host (a later key change is still refused); "Copy
-    // Fingerprint" lets the user pin it via config instead.
+    // Enterprise mode: no silent trust-on-first-use.
     if (enterpriseMode()) {
       const sha = 'SHA256:' + fp;
+      // Strictest posture: require a pre-configured hostFingerprint — refuse,
+      // don't even offer interactive Trust & Pin.
+      if (vscode.workspace.getConfiguration('quicksync').get('requirePinnedFingerprint', false)) {
+        vscode.window
+          .showErrorMessage(
+            `QuickSync (enterprise, strict): host ${host}:${port} has no pre-configured fingerprint.\n\n` +
+              `Server presented:\n${sha}\n\nVerify out-of-band and set "hostFingerprint" in the site / config, then reconnect.`,
+            { modal: true },
+            'Copy Fingerprint'
+          )
+          .then((c) => {
+            if (c === 'Copy Fingerprint') vscode.env.clipboard.writeText(sha);
+          });
+        return cb(false);
+      }
+      // Otherwise: show the presented fingerprint and require an explicit,
+      // informed decision. "Trust & Pin" accepts it (a later key change is
+      // still refused); "Copy Fingerprint" lets the user pin it via config.
       vscode.window
         .showWarningMessage(
           `QuickSync (enterprise mode): host ${host}:${port} is not yet trusted.\n\n` +
