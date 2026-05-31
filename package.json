@@ -313,10 +313,10 @@
         },
         "quicksync.concurrentTransfers": {
           "type": "integer",
-          "default": 1,
+          "default": 4,
           "minimum": 1,
           "maximum": 8,
-          "description": "Number of files to upload at once via the transfer queue (1 = sequential)."
+          "description": "Number of files to upload in parallel (each over its own verified connection). Higher = faster for many small files; 1 = sequential."
         },
         "quicksync.compareBeforeOverwrite": {
           "type": "boolean",
@@ -337,6 +337,11 @@
           "type": "boolean",
           "default": false,
           "description": "Append a local, redacted audit log of connect/upload/download/delete/rename/backup/restore actions (no secrets). Always on in enterprise mode."
+        },
+        "quicksync.requirePinnedFingerprint": {
+          "type": "boolean",
+          "default": false,
+          "description": "Strictest host verification: in enterprise mode, refuse hosts without a pre-configured \"hostFingerprint\" (no interactive Trust & Pin)."
         }
       }
     },

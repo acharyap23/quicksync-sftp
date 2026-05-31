@@ -45,14 +45,70 @@ class TransferItem {
   }
 }
 
+// A small pool of independent, fully-verified SFTP connections so uploads can
+// run in parallel. ssh2-sftp-client is NOT safe for concurrent ops on one
+// client, so each worker gets its own connection. Connections are created via
+// the same secure connectSftp path (host-key verification, pinned algorithms,
+// SecretStorage) — parallelism does not weaken any security control.
+class ClientPool {
+  constructor(connectFn) {
+    this.connectFn = connectFn;
+    this.size = 1;
+    this.clients = [];
+    this.free = [];
+    this.connecting = false;
+  }
+  async acquire() {
+    for (;;) {
+      if (this.free.length) return this.free.pop();
+      if (this.clients.length < this.size && !this.connecting) {
+        this.connecting = true;
+        try {
+          const c = await this.connectFn(); // full secure (host-verified) connection
+          this.clients.push(c);
+          return c;
+        } finally {
+          this.connecting = false;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 40)); // wait for a client to free up
+    }
+  }
+  release(c) {
+    if (c) this.free.push(c);
+  }
+  async evict(c) {
+    this.clients = this.clients.filter((x) => x !== c);
+    this.free = this.free.filter((x) => x !== c);
+    try {
+      await c.end();
+    } catch {
+      /* already gone */
+    }
+  }
+  async closeAll() {
+    const cs = this.clients;
+    this.clients = [];
+    this.free = [];
+    for (const c of cs) {
+      try {
+        await c.end();
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}
+
 class TransferQueue {
-  constructor(conn, onChange, audit) {
+  constructor(conn, onChange, audit, pool) {
     this.conn = conn;
     this.items = [];
     this.active = 0;
     this.seq = 0;
     this.onChange = onChange || (() => {});
     this.audit = audit || { log() {} };
+    this.pool = pool;
   }
 
   get concurrency() {
@@ -62,11 +118,13 @@ class TransferQueue {
     return Math.min(8, Math.max(1, Number(n) || 1));
   }
 
-  enqueue(localFull, remotePath, label) {
+  enqueue(localFull, remotePath, label, opts) {
     // Dedupe: skip if an active item already targets this remote path.
     const dup = this.items.find((i) => i.remotePath === remotePath && ACTIVE_STATES.includes(i.state));
     if (dup) return dup;
     const item = new TransferItem(++this.seq, localFull, remotePath, label);
+    item.onComplete = opts && opts.onComplete;
+    item.attempts = 0;
     this.items.push(item);
     this.onChange();
     this._pump();
@@ -102,6 +160,7 @@ class TransferQueue {
   }
 
   _pump() {
+    this.pool.size = this.concurrency; // size the pool to the configured concurrency
     while (this.active < this.concurrency) {
       const next = this.items.find((i) => i.state === STATE.QUEUED);
       if (!next) break;
@@ -109,6 +168,10 @@ class TransferQueue {
       this._run(next).finally(() => {
         this.active--;
         this._pump();
+        // Free idle connections once the queue is drained.
+        if (this.active === 0 && !this.items.some((i) => i.state === STATE.QUEUED)) {
+          this.pool.closeAll();
+        }
       });
     }
   }
@@ -124,8 +187,9 @@ class TransferQueue {
     this.onChange();
 
     const tmp = item.remotePath + '.qs-tmp';
+    let sftp = null;
     try {
-      const sftp = await this.conn.getClient();
+      sftp = await this.pool.acquire(); // own connection → safe to run in parallel
 
       // Rollback support: back up an existing remote file before overwriting it.
       const conf = vscode.workspace.getConfiguration('quicksync');
@@ -180,13 +244,43 @@ class TransferQueue {
         this.audit.log('upload', { remotePath: item.remotePath, bytes: item.total, result: 'ok' });
       }
     } catch (err) {
+      const msg = err && err.message ? err.message : 'upload failed';
+      // A dropped/dead connection? Evict the client so a fresh one is created.
+      const connErr = /econn|closed|timed?\s*out|not connected|channel|disconnect|ENOTFOUND|EPIPE|destroyed|ECONNRESET|handshake/i.test(msg);
+      if (connErr && sftp && this.pool) {
+        await this.pool.evict(sftp);
+        sftp = null;
+      }
+      // Retry transient failures (esp. connection drops) before giving up.
+      if ((item.attempts || 0) < 2) {
+        item.attempts = (item.attempts || 0) + 1;
+        item.state = STATE.QUEUED;
+        item.error = null;
+        item.transferred = 0;
+        if (sftp) this.pool.release(sftp);
+        sftp = null;
+        this.onChange();
+        setTimeout(() => this._pump(), connErr ? 600 : 150);
+        return; // not terminal — don't notify onComplete yet
+      }
       item.state = STATE.FAILED;
-      item.error = err && err.message ? err.message : 'upload failed';
+      item.error = msg;
       this.audit.log('upload', { remotePath: item.remotePath, result: 'failed' });
-      // Clean up any partial temp file.
+      if (sftp) {
+        try {
+          await sftp.delete(tmp);
+        } catch {
+          /* ignore */
+        }
+      }
+    } finally {
+      if (sftp) this.pool.release(sftp);
+    }
+    // Notify once on a terminal state (used to record the sync manifest).
+    if (item.onComplete && [STATE.COMPLETED, STATE.FAILED, STATE.CANCELLED].includes(item.state) && !item._notified) {
+      item._notified = true;
       try {
-        const sftp = await this.conn.getClient();
-        await sftp.delete(tmp);
+        item.onComplete(item.state);
       } catch {
         /* ignore */
       }
@@ -283,7 +377,14 @@ function registerTransferQueue(context, deps) {
     }, 250);
   };
 
-  const queue = new TransferQueue({ getClient: () => conn.getClient(), get cfg() { return conn && conn.cfg; } }, onChange, audit);
+  // Pool of independent, fully-verified connections for parallel uploads.
+  const pool = new ClientPool(async () => {
+    if (!conn || !conn.deps) throw new Error('Not connected.');
+    const cfg = await conn.deps.loadConfig();
+    if (!cfg) throw new Error('No QuickSync config found.');
+    return conn.deps.connectSftp(cfg); // host-verified, pinned-algorithm connection
+  });
+  const queue = new TransferQueue({ getClient: () => conn.getClient(), get cfg() { return conn && conn.cfg; } }, onChange, audit, pool);
   provider = new QueueTreeProvider(queue);
 
   const view = vscode.window.createTreeView('quicksyncQueue', { treeDataProvider: provider });

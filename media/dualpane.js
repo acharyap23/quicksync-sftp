@@ -199,8 +199,27 @@
       render(m.type, typeof m.path === 'string' ? m.path : '', Array.isArray(m.entries) ? m.entries : []);
     } else if (m.type === 'log') {
       log(String(m.text || ''));
+    } else if (m.type === 'transfers') {
+      renderTransfers(Array.isArray(m.items) ? m.items : []);
     }
   });
+
+  function renderTransfers(items) {
+    const tb = $('xfer');
+    if (!tb) return;
+    tb.textContent = '';
+    items
+      .slice()
+      .reverse()
+      .forEach((t) => {
+        const tr = document.createElement('tr');
+        tr.appendChild(cell('↑ ' + (t.label || '')));
+        tr.appendChild(cell(fmtSize(t.total), 'col-size'));
+        tr.appendChild(cell(t.state === 'Uploading' ? (t.percent || 0) + '%' : '', 'col-perm'));
+        tr.appendChild(cell(t.state || ''));
+        tb.appendChild(tr);
+      });
+  }
 
   init();
 })();

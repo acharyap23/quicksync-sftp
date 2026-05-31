@@ -101,7 +101,16 @@ function getHtml(webview, mediaUri, n) {
       </div>
     </section>
   </div>
-  <div class="log" id="log"></div>
+  <div class="xfer-panel">
+    <div class="xfer-head">Transfer Queue</div>
+    <div class="tbwrap xfer-wrap">
+      <table class="flist">
+        <thead><tr><th>File</th><th class="col-size">Size</th><th class="col-perm">%</th><th>Status</th></tr></thead>
+        <tbody id="xfer"></tbody>
+      </table>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
   <script nonce="${n}" src="${js}"></script>
 </body>
 </html>`;
@@ -123,7 +132,16 @@ function registerDualPane(context, deps) {
     });
     const n = nonce();
     panel.webview.html = getHtml(panel.webview, mediaUri, n);
+    // Push live transfer-queue snapshots to the bottom panel while open.
+    const ticker = setInterval(() => {
+      if (!panel) return;
+      const q = deps.getQueue && deps.getQueue();
+      if (!q || !q.items) return;
+      const items = q.items.slice(-60).map((t) => ({ label: t.label, state: t.state, percent: t.percent, total: t.total }));
+      panel.webview.postMessage({ type: 'transfers', items });
+    }, 600);
     panel.onDidDispose(() => {
+      clearInterval(ticker);
       panel = null;
     }, null, context.subscriptions);
     panel.webview.onDidReceiveMessage((m) => handleMessage(m).catch(() => {}), null, context.subscriptions);
@@ -421,6 +439,11 @@ function registerDualPane(context, deps) {
     }
     let done = 0;
     for (const v of valid) {
+      // Defense-in-depth: never write outside the workspace, even via matching path.
+      if (!localInside(root, v.target)) {
+        logToView('Refused: ' + v.target + ' is outside the workspace.');
+        continue;
+      }
       try {
         fs.mkdirSync(path.dirname(v.target), { recursive: true });
         if (v.isDir) await sftp.downloadDir(v.norm, v.target);
