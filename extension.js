@@ -869,6 +869,68 @@ async function runSync(onlyChanged) {
   }
 }
 
+// Upload files modified within the last N minutes. Purely local (no remote
+// listing) so it's fast, and goes through the same safe path: trust check,
+// deny-list (via walk), explicit confirmation, and the atomic, host-verified
+// transfer queue.
+async function syncRecentCommand() {
+  if (!vscode.workspace.isTrusted) {
+    vscode.window.showWarningMessage('QuickSync is disabled in untrusted workspaces.');
+    return;
+  }
+  if (isSyncing) {
+    vscode.window.showInformationMessage('QuickSync: a sync is already in progress.');
+    return;
+  }
+  const pick = await vscode.window.showQuickPick(
+    [
+      { label: 'Last 15 minutes', m: 15 },
+      { label: 'Last 30 minutes', m: 30 },
+      { label: 'Last 1 hour', m: 60 },
+      { label: 'Last 3 hours', m: 180 },
+      { label: 'Custom…', m: 0 },
+    ],
+    { placeHolder: 'Upload files modified within…' }
+  );
+  if (!pick) return;
+  let minutes = pick.m;
+  if (minutes === 0) {
+    const v = await vscode.window.showInputBox({
+      prompt: 'Upload files modified within how many minutes?',
+      value: '30',
+      validateInput: (s) => (/^\d+$/.test(s) && Number(s) > 0 ? null : 'Enter a positive whole number of minutes'),
+    });
+    if (!v) return;
+    minutes = parseInt(v, 10);
+  }
+
+  isSyncing = true;
+  try {
+    const cfg = await resolveConfig();
+    if (!cfg) {
+      vscode.window.showWarningMessage('QuickSync: no config found.');
+      return;
+    }
+    const root = getWorkspaceRoot();
+    const all = await walk(root, root, cfg.ignore || []); // deny-list + ignore applied
+    const cutoff = Date.now() - minutes * 60000;
+    const files = all.filter((f) => f.mtime >= cutoff);
+    if (files.length === 0) {
+      vscode.window.showInformationMessage(`QuickSync: no files modified in the last ${minutes} minute(s).`);
+      return;
+    }
+    const ok = await vscode.window.showWarningMessage(
+      `Upload ${files.length} file(s) modified in the last ${minutes} min to ${cfg.username}@${cfg.host}:${cfg.remotePath} (overwrites existing)?`,
+      { modal: true },
+      'Upload'
+    );
+    if (ok !== 'Upload') return;
+    await enqueueEntries(cfg, files, { confirm: false });
+  } finally {
+    isSyncing = false;
+  }
+}
+
 // ---------- Phase 2: manual sync commands ----------
 
 function requireTrust() {
@@ -1411,6 +1473,7 @@ function activate(context) {
     ),
     vscode.commands.registerCommand('quicksync.syncFolder', (uri) => syncUris(uri ? [uri] : [])),
     vscode.commands.registerCommand('quicksync.syncWorkspace', () => runSync(false)),
+    vscode.commands.registerCommand('quicksync.syncRecent', () => syncRecentCommand()),
     // Phase 4: compare
     vscode.commands.registerCommand('quicksync.compareWithRemote', (uri) => compareWithRemoteCommand(uri)),
     // Phase 7: safety

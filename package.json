@@ -145,6 +145,12 @@
         "category": "QuickSync"
       },
       {
+        "command": "quicksync.syncRecent",
+        "title": "Sync Recently Modified…",
+        "category": "QuickSync",
+        "icon": "$(clock)"
+      },
+      {
         "command": "quicksync.queue.cancel",
         "title": "Cancel",
         "category": "QuickSync",
@@ -246,6 +252,7 @@
         { "command": "quicksync.sites.new", "when": "view == quicksyncSites", "group": "navigation@1" },
         { "command": "quicksync.sites.quickConnect", "when": "view == quicksyncSites", "group": "navigation@2" },
         { "command": "quicksync.sites.fromSshConfig", "when": "view == quicksyncSites", "group": "navigation@3" },
+        { "command": "quicksync.syncRecent", "when": "view == quicksyncSites", "group": "1_undo@0" },
         { "command": "quicksync.undoSync", "when": "view == quicksyncSites", "group": "1_undo@1" },
         { "command": "quicksync.sites.disconnect", "when": "view == quicksyncSites && quicksync.connected", "group": "navigation@4" },
         { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote && !quicksync.connected", "group": "navigation@1" },
