@@ -183,32 +183,52 @@ async function persistManifest() {
     }
   }
 }
-// Build a map of the remote tree: relPath(POSIX) → { size, mtime }. Used to
-// decide "changed" by comparing against what's ACTUALLY on the server, which is
-// self-correcting (survives restarts, partial syncs, and failures) and doesn't
-// depend on a local record. Skips our own .quicksync-backups folders.
-async function buildRemoteMap(sftp, base) {
-  const map = new Map();
-  async function walkRemote(dir) {
-    let entries;
-    try {
-      entries = await sftp.list(dir);
-    } catch {
-      return;
+// List ONLY the given remote directories (those containing local files) in
+// parallel, returning Map(dir → [file entries]). Listing just the relevant
+// folders — instead of walking the whole remote tree — keeps "compare with
+// server" fast even when the server holds large unrelated trees. Each worker
+// uses its own verified connection (ssh2-sftp-client isn't concurrency-safe).
+async function listRemoteDirs(cfg, dirs, concurrency) {
+  const result = new Map();
+  if (dirs.length === 0) return result;
+  const n = Math.min(Math.max(1, concurrency || 1), 6, dirs.length);
+  const clients = [];
+  try {
+    for (let i = 0; i < n; i++) clients.push(await connectSftp(cfg)); // serial connect avoids auth races
+  } catch (err) {
+    for (const c of clients) {
+      try {
+        await c.end();
+      } catch {
+        /* ignore */
+      }
     }
-    for (const e of entries) {
-      if (e.name === '.quicksync-backups') continue;
-      const full = (dir === '/' ? '' : dir) + '/' + e.name;
-      if (e.type === 'd') {
-        await walkRemote(full);
-      } else if (e.type === '-') {
-        const rel = full.slice(base.length).replace(/^\/+/, '');
-        map.set(rel, { size: e.size, mtime: e.modifyTime });
+    throw err;
+  }
+  let idx = 0;
+  async function worker(client) {
+    while (idx < dirs.length) {
+      const dir = dirs[idx++];
+      try {
+        const l = await client.list(dir);
+        result.set(dir, l.filter((e) => e.type === '-'));
+      } catch {
+        result.set(dir, []); // dir missing → its files count as new
       }
     }
   }
-  await walkRemote(base);
-  return map;
+  try {
+    await Promise.all(clients.map((c) => worker(c)));
+  } finally {
+    for (const c of clients) {
+      try {
+        await c.end();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return result;
 }
 
 function clearSynced(cfg, rel) {
@@ -794,20 +814,34 @@ async function runSync(onlyChanged) {
     let files = allFiles;
     if (onlyChanged) {
       const base = cfg.remotePath.replace(/\\/g, '/').replace(/\/$/, '') || '/';
-      let remoteMap = null;
+      // Only the folders that actually contain local files (deduped) — not the
+      // whole remote tree. Map each local file to its remote path + parent dir.
+      const remoteOf = new Map();
+      const dirSet = new Set();
+      for (const f of allFiles) {
+        const remoteFull = base + '/' + f.rel.split(path.sep).join('/');
+        remoteOf.set(f, remoteFull);
+        dirSet.add(path.posix.dirname(remoteFull));
+      }
+      const dirs = [...dirSet];
+      const concurrency = vscode.workspace.getConfiguration('quicksync').get('concurrentTransfers', 4);
+      let listing;
       try {
-        const sftp = await connection.getClient();
-        remoteMap = await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: 'QuickSync: comparing with server…' },
-          () => buildRemoteMap(sftp, base)
+        listing = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `QuickSync: comparing ${dirs.length} folder(s) with server…` },
+          () => listRemoteDirs(cfg, dirs, concurrency)
         );
       } catch (err) {
         vscode.window.showErrorMessage(`QuickSync: could not compare with the server (${err.message}).`);
         return;
       }
+      const remoteSizes = new Map(); // remoteFullPath → size
+      for (const [dir, items] of listing) {
+        for (const it of items) remoteSizes.set(dir + '/' + it.name, it.size);
+      }
       files = allFiles.filter((f) => {
-        const r = remoteMap.get(f.rel.split(path.sep).join('/'));
-        return !r || r.size !== f.size; // new on server, or different size
+        const sz = remoteSizes.get(remoteOf.get(f));
+        return sz === undefined || sz !== f.size; // new on server, or different size
       });
     }
 
