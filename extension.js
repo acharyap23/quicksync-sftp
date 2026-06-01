@@ -183,6 +183,34 @@ async function persistManifest() {
     }
   }
 }
+// Build a map of the remote tree: relPath(POSIX) → { size, mtime }. Used to
+// decide "changed" by comparing against what's ACTUALLY on the server, which is
+// self-correcting (survives restarts, partial syncs, and failures) and doesn't
+// depend on a local record. Skips our own .quicksync-backups folders.
+async function buildRemoteMap(sftp, base) {
+  const map = new Map();
+  async function walkRemote(dir) {
+    let entries;
+    try {
+      entries = await sftp.list(dir);
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.name === '.quicksync-backups') continue;
+      const full = (dir === '/' ? '' : dir) + '/' + e.name;
+      if (e.type === 'd') {
+        await walkRemote(full);
+      } else if (e.type === '-') {
+        const rel = full.slice(base.length).replace(/^\/+/, '');
+        map.set(rel, { size: e.size, mtime: e.modifyTime });
+      }
+    }
+  }
+  await walkRemote(base);
+  return map;
+}
+
 function clearSynced(cfg, rel) {
   const m = getManifest(cfg);
   if (m[rel] !== undefined) {
@@ -401,7 +429,7 @@ async function walk(dir, root, ignoreList, files = [], realRoot = null) {
       await walk(full, root, ignoreList, files, realRoot);
     } else if (entry.isFile()) {
       const st = await fs.promises.stat(full);
-      files.push({ full, rel, mtime: st.mtimeMs });
+      files.push({ full, rel, mtime: st.mtimeMs, size: st.size });
     }
   }
   return files;
@@ -760,18 +788,36 @@ async function runSync(onlyChanged) {
       );
     }
 
-    const manifestEmpty = Object.keys(getManifest(cfg)).length === 0;
-    // "Changed" = modified since recorded in the manifest (resumable across
-    // restarts and partial syncs). "All" uploads everything.
-    const files = onlyChanged ? allFiles.filter((f) => isChangedFile(cfg, f.rel, f.mtime)) : allFiles;
+    // "Changed" = files missing on the server or a different size. We compare
+    // against the actual remote tree, so already-uploaded files are skipped
+    // regardless of manifests/restarts/partial syncs. "All" uploads everything.
+    let files = allFiles;
+    if (onlyChanged) {
+      const base = cfg.remotePath.replace(/\\/g, '/').replace(/\/$/, '') || '/';
+      let remoteMap = null;
+      try {
+        const sftp = await connection.getClient();
+        remoteMap = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: 'QuickSync: comparing with server…' },
+          () => buildRemoteMap(sftp, base)
+        );
+      } catch (err) {
+        vscode.window.showErrorMessage(`QuickSync: could not compare with the server (${err.message}).`);
+        return;
+      }
+      files = allFiles.filter((f) => {
+        const r = remoteMap.get(f.rel.split(path.sep).join('/'));
+        return !r || r.size !== f.size; // new on server, or different size
+      });
+    }
 
     if (files.length === 0) {
-      vscode.window.showInformationMessage('QuickSync: nothing to upload — everything is up to date.');
+      vscode.window.showInformationMessage('QuickSync: nothing to upload — everything matches the server.');
       return;
     }
 
-    // H-4: explicit confirmation before a full/first mass overwrite.
-    const fullSync = !onlyChanged || manifestEmpty;
+    // H-4: explicit confirmation before a full mass overwrite.
+    const fullSync = !onlyChanged;
     if (fullSync) {
       const ok = await vscode.window.showWarningMessage(
         `QuickSync will upload ${files.length} file(s) to ${cfg.username}@${cfg.host}:${cfg.remotePath} and OVERWRITE existing remote files. Continue?`,
@@ -1009,7 +1055,7 @@ async function flushAutoSync() {
       } catch {
         continue;
       }
-      files.push({ full, rel, mtime: st.mtimeMs });
+      files.push({ full, rel, mtime: st.mtimeMs, size: st.size });
     }
   }
   // Auto-sync never prompts: silently drop always-ignored + flagged-sensitive files.
