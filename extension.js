@@ -183,6 +183,53 @@ async function persistManifest() {
     }
   }
 }
+function clearSynced(cfg, rel) {
+  const m = getManifest(cfg);
+  if (m[rel] !== undefined) {
+    delete m[rel];
+    _mfDirty = true;
+    if (!_mfTimer) _mfTimer = setTimeout(persistManifest, 1500);
+  }
+}
+
+// Sync session journal (last 5 per target) for Undo. Records, per completed
+// file, where its previous version was backed up (overwrite) or that it was
+// newly created — enough to revert a whole sync. Only populated when backups
+// are on (enterprise / backupBeforeOverwrite), since that produces the
+// restore points. Items capped to bound storage.
+function journalKey(cfg) {
+  return `quicksync.journal:${cfg.host}:${cfg.port || 22}:${cfg.remotePath}`;
+}
+function getJournal(cfg) {
+  return extContext.workspaceState.get(journalKey(cfg)) || [];
+}
+let _journalRef = null;
+let _journalCfg = null;
+let _journalTimer = null;
+function scheduleJournalPersist() {
+  if (_journalTimer) return;
+  _journalTimer = setTimeout(() => {
+    _journalTimer = null;
+    if (_journalRef && _journalCfg) {
+      extContext.workspaceState.update(journalKey(_journalCfg), _journalRef);
+    }
+  }, 1500);
+}
+function startSession(cfg, label) {
+  const journal = getJournal(cfg);
+  const session = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: Date.now(), label, items: [], undone: false };
+  journal.unshift(session);
+  while (journal.length > 5) journal.pop();
+  _journalRef = journal;
+  _journalCfg = cfg;
+  extContext.workspaceState.update(journalKey(cfg), journal);
+  return session;
+}
+function recordSessionItem(session, entry) {
+  if (!session) return;
+  if (session.items.length < 8000) session.items.push(entry);
+  scheduleJournalPersist();
+}
 
 // Side-effect-free read of the workspace quicksync.json "ignore" array.
 function getWorkspaceIgnore() {
@@ -878,11 +925,18 @@ async function enqueueEntries(cfg, files, opts = {}) {
   } catch {
     /* dirs best-effort */
   }
+  // Track this batch as an undoable session when backups are on.
+  const undoable = enterpriseMode() || vscode.workspace.getConfiguration('quicksync').get('backupBeforeOverwrite', false);
+  const session = undoable ? startSession(cfg, `${files.length} file(s)`) : null;
   for (const f of files) {
     const remote = base + '/' + f.rel.split(path.sep).join('/');
     transferQueue.enqueue(f.full, remote, f.rel, {
-      onComplete: (state) => {
-        if (state === 'Completed') markSynced(cfg, f.rel, f.mtime);
+      onComplete: (state, info) => {
+        if (state !== 'Completed') return;
+        markSynced(cfg, f.rel, f.mtime);
+        if (session) {
+          recordSessionItem(session, { remote, rel: f.rel, backup: info && info.backup, existed: info ? !!info.existed : undefined });
+        }
       },
     });
   }
@@ -1149,6 +1203,95 @@ async function clearCredentials() {
   vscode.window.showInformationMessage('QuickSync: saved credentials cleared.');
 }
 
+// Undo a sync: restore overwritten files from backup, delete files that were
+// newly created. Safe — confirms first, never deletes a file that existed
+// before the sync, stays within the target, and is audit-logged.
+async function undoSyncCommand(latest) {
+  if (!requireTrust()) return;
+  const cfg = await resolveConfig();
+  if (!cfg) {
+    vscode.window.showWarningMessage('QuickSync: no config found.');
+    return;
+  }
+  const journal = getJournal(cfg).filter((s) => !s.undone && s.items && s.items.length);
+  if (journal.length === 0) {
+    vscode.window.showInformationMessage(
+      'QuickSync: no undoable syncs found. (Undo records restore points only when backups are on — enable Enterprise mode or quicksync.backupBeforeOverwrite.)'
+    );
+    return;
+  }
+  let session = journal[0];
+  if (!latest) {
+    const pick = await vscode.window.showQuickPick(
+      journal.map((s) => ({ label: new Date(s.ts).toLocaleString(), description: `${s.items.length} file(s)`, s })),
+      { placeHolder: 'Undo which sync?' }
+    );
+    if (!pick) return;
+    session = pick.s;
+  }
+  const restorable = session.items.filter((i) => i.backup).length;
+  const removable = session.items.filter((i) => !i.backup && i.existed === false).length;
+  const ok = await vscode.window.showWarningMessage(
+    `Undo sync from ${new Date(session.ts).toLocaleString()} (${session.items.length} file(s))?\n\n` +
+      `${restorable} overwritten file(s) will be restored from backup; ${removable} newly-created file(s) will be deleted. Files that existed before and weren't backed up are left untouched.`,
+    { modal: true },
+    'Undo'
+  );
+  if (ok !== 'Undo') return;
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'QuickSync: undoing sync…' },
+    async () => {
+      let sftp;
+      try {
+        sftp = await connection.getClient();
+      } catch {
+        vscode.window.showErrorMessage('QuickSync: not connected.');
+        return;
+      }
+      let restored = 0;
+      let deleted = 0;
+      let failed = 0;
+      for (const it of session.items) {
+        try {
+          if (it.backup) {
+            // Move the backup back over the current file (atomic where possible).
+            try {
+              await sftp.posixRename(it.backup, it.remote);
+            } catch {
+              try {
+                await sftp.delete(it.remote);
+              } catch {
+                /* may not exist */
+              }
+              await sftp.rename(it.backup, it.remote);
+            }
+            restored++;
+            auditLogger.log('restore', { remotePath: it.remote, from: it.backup, detail: 'undo', result: 'ok' });
+          } else if (it.existed === false) {
+            await sftp.delete(it.remote);
+            deleted++;
+            auditLogger.log('delete', { remotePath: it.remote, detail: 'undo-new', result: 'ok' });
+          }
+          if (it.rel) clearSynced(cfg, it.rel); // reverted → mark changed so it re-syncs
+        } catch {
+          failed++;
+        }
+      }
+      session.undone = true;
+      try {
+        await extContext.workspaceState.update(journalKey(cfg), getJournal(cfg).map((s) => (s.id === session.id ? session : s)));
+      } catch {
+        /* ignore */
+      }
+      vscode.commands.executeCommand('quicksync.remote.refresh');
+      vscode.window.showInformationMessage(
+        `QuickSync: undo complete — restored ${restored}, deleted ${deleted}${failed ? `, ${failed} failed` : ''}.`
+      );
+    }
+  );
+}
+
 // Phase 7: reset the per-workspace "always ignore" safety list.
 async function clearSafetyIgnores() {
   await extContext.globalState.update(safetyIgnoreKey(), undefined);
@@ -1191,7 +1334,10 @@ function activate(context) {
     // Phase 4: compare
     vscode.commands.registerCommand('quicksync.compareWithRemote', (uri) => compareWithRemoteCommand(uri)),
     // Phase 7: safety
-    vscode.commands.registerCommand('quicksync.clearSafetyIgnores', () => clearSafetyIgnores())
+    vscode.commands.registerCommand('quicksync.clearSafetyIgnores', () => clearSafetyIgnores()),
+    // Undo
+    vscode.commands.registerCommand('quicksync.undoLastSync', () => undoSyncCommand(true)),
+    vscode.commands.registerCommand('quicksync.undoSync', () => undoSyncCommand(false))
   );
 
   // Phases 1+3: native remote explorer + transfer queue, sharing one connection.

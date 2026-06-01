@@ -195,13 +195,16 @@ class TransferQueue {
       const conf = vscode.workspace.getConfiguration('quicksync');
       if (conf.get('backupBeforeOverwrite', false) || conf.get('enterpriseMode', false)) {
         try {
-          if (await sftp.exists(item.remotePath)) {
+          const existed = !!(await sftp.exists(item.remotePath));
+          item.existed = existed; // for undo: was there a prior version?
+          if (existed) {
             const dir = POSIX.dirname(item.remotePath);
             const bdir = POSIX.join(dir, '.quicksync-backups');
             if (!(await sftp.exists(bdir))) await sftp.mkdir(bdir, true);
             const stamp = new Date().toISOString().replace(/[:.]/g, '-');
             const backup = POSIX.join(bdir, POSIX.basename(item.remotePath) + '.' + stamp);
             await sftp.rename(item.remotePath, backup); // original preserved as backup
+            item.backupPath = backup; // for undo: where to restore from
             this.audit.log('backup', { remotePath: item.remotePath, to: backup });
           }
         } catch {
@@ -280,7 +283,7 @@ class TransferQueue {
     if (item.onComplete && [STATE.COMPLETED, STATE.FAILED, STATE.CANCELLED].includes(item.state) && !item._notified) {
       item._notified = true;
       try {
-        item.onComplete(item.state);
+        item.onComplete(item.state, { existed: item.existed, backup: item.backupPath });
       } catch {
         /* ignore */
       }

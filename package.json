@@ -200,7 +200,9 @@
       { "command": "quicksync.remote.enterDir", "title": "Enter Folder", "category": "QuickSync", "icon": "$(folder-opened)" },
       { "command": "quicksync.remote.goUp", "title": "Go Up", "category": "QuickSync", "icon": "$(arrow-up)" },
       { "command": "quicksync.remote.goHome", "title": "Go to Root", "category": "QuickSync", "icon": "$(home)" },
-      { "command": "quicksync.openAuditLog", "title": "Open Audit Log", "category": "QuickSync" }
+      { "command": "quicksync.openAuditLog", "title": "Open Audit Log", "category": "QuickSync" },
+      { "command": "quicksync.undoLastSync", "title": "Undo Last Sync", "category": "QuickSync", "icon": "$(discard)" },
+      { "command": "quicksync.undoSync", "title": "Undo a Sync…", "category": "QuickSync", "icon": "$(history)" }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -244,6 +246,7 @@
         { "command": "quicksync.sites.new", "when": "view == quicksyncSites", "group": "navigation@1" },
         { "command": "quicksync.sites.quickConnect", "when": "view == quicksyncSites", "group": "navigation@2" },
         { "command": "quicksync.sites.fromSshConfig", "when": "view == quicksyncSites", "group": "navigation@3" },
+        { "command": "quicksync.undoSync", "when": "view == quicksyncSites", "group": "1_undo@1" },
         { "command": "quicksync.sites.disconnect", "when": "view == quicksyncSites && quicksync.connected", "group": "navigation@4" },
         { "command": "quicksync.remote.connect", "when": "view == quicksyncRemote && !quicksync.connected", "group": "navigation@1" },
         { "command": "quicksync.remote.disconnect", "when": "view == quicksyncRemote && quicksync.connected", "group": "navigation@1" },
