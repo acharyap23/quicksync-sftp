@@ -188,7 +188,7 @@ async function persistManifest() {
 // folders — instead of walking the whole remote tree — keeps "compare with
 // server" fast even when the server holds large unrelated trees. Each worker
 // uses its own verified connection (ssh2-sftp-client isn't concurrency-safe).
-async function listRemoteDirs(cfg, dirs, concurrency) {
+async function listRemoteDirs(cfg, dirs, concurrency, progress, token) {
   const result = new Map();
   if (dirs.length === 0) return result;
   const n = Math.min(Math.max(1, concurrency || 1), 6, dirs.length);
@@ -206,8 +206,10 @@ async function listRemoteDirs(cfg, dirs, concurrency) {
     throw err;
   }
   let idx = 0;
+  let done = 0;
   async function worker(client) {
     while (idx < dirs.length) {
+      if (token && token.isCancellationRequested) return;
       const dir = dirs[idx++];
       try {
         const l = await client.list(dir);
@@ -215,6 +217,8 @@ async function listRemoteDirs(cfg, dirs, concurrency) {
       } catch {
         result.set(dir, []); // dir missing → its files count as new
       }
+      done++;
+      if (progress) progress.report({ increment: 100 / dirs.length, message: `${done}/${dirs.length} folders` });
     }
   }
   try {
@@ -228,6 +232,7 @@ async function listRemoteDirs(cfg, dirs, concurrency) {
       }
     }
   }
+  if (token && token.isCancellationRequested) throw new Error('cancelled');
   return result;
 }
 
@@ -824,16 +829,30 @@ async function runSync(onlyChanged) {
         dirSet.add(path.posix.dirname(remoteFull));
       }
       const dirs = [...dirSet];
-      const concurrency = vscode.workspace.getConfiguration('quicksync').get('concurrentTransfers', 4);
+      // Use up to 6 parallel connections for listing (capped inside the helper).
+      const concurrency = Math.max(4, vscode.workspace.getConfiguration('quicksync').get('concurrentTransfers', 4));
       let listing;
       try {
         listing = await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: `QuickSync: comparing ${dirs.length} folder(s) with server…` },
-          () => listRemoteDirs(cfg, dirs, concurrency)
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `QuickSync: comparing ${dirs.length} folder(s) with server…`,
+            cancellable: true,
+          },
+          (progress, token) => listRemoteDirs(cfg, dirs, concurrency, progress, token)
         );
       } catch (err) {
-        vscode.window.showErrorMessage(`QuickSync: could not compare with the server (${err.message}).`);
+        if (err && err.message === 'cancelled') {
+          vscode.window.showInformationMessage('QuickSync: comparison cancelled.');
+        } else {
+          vscode.window.showErrorMessage(`QuickSync: could not compare with the server (${err.message}).`);
+        }
         return;
+      }
+      if (dirs.length > 300) {
+        vscode.window.showInformationMessage(
+          `QuickSync: compared ${dirs.length} folders. Tip: add node_modules / vendor / dist to "ignore" (or use "Sync Recently Modified") for much faster syncs.`
+        );
       }
       const remoteSizes = new Map(); // remoteFullPath → size
       for (const [dir, items] of listing) {
