@@ -109,6 +109,10 @@ class TransferQueue {
     this.onChange = onChange || (() => {});
     this.audit = audit || { log() {} };
     this.pool = pool;
+    this.onIdle = null; // (done, failed) → called when the queue drains
+    this._idle = true;
+    this._batchDone = 0;
+    this._batchFail = 0;
   }
 
   get concurrency() {
@@ -161,6 +165,12 @@ class TransferQueue {
 
   _pump() {
     this.pool.size = this.concurrency; // size the pool to the configured concurrency
+    // New batch starting (was idle, now has work): reset per-batch counters.
+    if (this._idle && this.active === 0 && this.items.some((i) => i.state === STATE.QUEUED)) {
+      this._idle = false;
+      this._batchDone = 0;
+      this._batchFail = 0;
+    }
     while (this.active < this.concurrency) {
       const next = this.items.find((i) => i.state === STATE.QUEUED);
       if (!next) break;
@@ -168,9 +178,19 @@ class TransferQueue {
       this._run(next).finally(() => {
         this.active--;
         this._pump();
-        // Free idle connections once the queue is drained.
+        // Free idle connections once the queue is drained, and report the batch.
         if (this.active === 0 && !this.items.some((i) => i.state === STATE.QUEUED)) {
           this.pool.closeAll();
+          if (!this._idle) {
+            this._idle = true;
+            if (this.onIdle) {
+              try {
+                this.onIdle(this._batchDone, this._batchFail);
+              } catch {
+                /* ignore */
+              }
+            }
+          }
         }
       });
     }
@@ -280,12 +300,16 @@ class TransferQueue {
       if (sftp) this.pool.release(sftp);
     }
     // Notify once on a terminal state (used to record the sync manifest).
-    if (item.onComplete && [STATE.COMPLETED, STATE.FAILED, STATE.CANCELLED].includes(item.state) && !item._notified) {
+    if ([STATE.COMPLETED, STATE.FAILED, STATE.CANCELLED].includes(item.state) && !item._notified) {
       item._notified = true;
-      try {
-        item.onComplete(item.state, { existed: item.existed, backup: item.backupPath });
-      } catch {
-        /* ignore */
+      if (item.state === STATE.COMPLETED) this._batchDone++;
+      else if (item.state === STATE.FAILED) this._batchFail++;
+      if (item.onComplete) {
+        try {
+          item.onComplete(item.state, { existed: item.existed, backup: item.backupPath });
+        } catch {
+          /* ignore */
+        }
       }
     }
     this.onChange();

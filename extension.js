@@ -1361,6 +1361,19 @@ function activate(context) {
   vscode.commands.executeCommand('setContext', 'quicksync.connected', false);
   transferQueue = registerTransferQueue(context, { audit: auditLogger });
   transferQueue.bindConnection(conn);
+  // When a batch finishes: flush the sync manifest and report the result so
+  // it's clear what uploaded vs failed (failed files remain "changed" to retry).
+  transferQueue.onIdle = (done, failed) => {
+    persistManifest();
+    if (!done && !failed) return;
+    if (failed) {
+      vscode.window.showWarningMessage(
+        `QuickSync: sync finished — ${done} uploaded, ${failed} failed. Run "Sync Changed Files" again to retry the failed ones.`
+      );
+    } else {
+      vscode.window.showInformationMessage(`QuickSync: sync finished — ${done} file(s) uploaded ✓`);
+    }
+  };
   registerRemoteExplorer(context, { loadConfig: resolveConfig, connectSftp, audit: auditLogger }, conn, transferQueue);
 
   // Site Manager — multi-site profiles driving the shared connection.
