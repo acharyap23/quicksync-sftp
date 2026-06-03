@@ -213,9 +213,11 @@
       .reverse()
       .forEach((t) => {
         const tr = document.createElement('tr');
-        tr.appendChild(cell('↑ ' + (t.label || '')));
+        const arrow = t.dir === 'down' ? '↓ ' : '↑ ';
+        tr.appendChild(cell(arrow + (t.label || '')));
         tr.appendChild(cell(fmtSize(t.total), 'col-size'));
-        tr.appendChild(cell(t.state === 'Uploading' ? (t.percent || 0) + '%' : '', 'col-perm'));
+        const inProgress = t.state === 'Uploading' || t.state === 'Downloading';
+        tr.appendChild(cell(inProgress ? (t.percent || 0) + '%' : '', 'col-perm'));
         tr.appendChild(cell(t.state || ''));
         tb.appendChild(tr);
       });

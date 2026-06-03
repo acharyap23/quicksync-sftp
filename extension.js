@@ -183,6 +183,106 @@ async function persistManifest() {
     }
   }
 }
+// List ONLY the given remote directories (those containing local files) in
+// parallel, returning Map(dir → [file entries]). Listing just the relevant
+// folders — instead of walking the whole remote tree — keeps "compare with
+// server" fast even when the server holds large unrelated trees. Each worker
+// uses its own verified connection (ssh2-sftp-client isn't concurrency-safe).
+async function listRemoteDirs(cfg, dirs, concurrency, progress, token) {
+  const result = new Map();
+  if (dirs.length === 0) return result;
+  const n = Math.min(Math.max(1, concurrency || 1), 6, dirs.length);
+  const clients = [];
+  try {
+    for (let i = 0; i < n; i++) clients.push(await connectSftp(cfg)); // serial connect avoids auth races
+  } catch (err) {
+    for (const c of clients) {
+      try {
+        await c.end();
+      } catch {
+        /* ignore */
+      }
+    }
+    throw err;
+  }
+  let idx = 0;
+  let done = 0;
+  async function worker(client) {
+    while (idx < dirs.length) {
+      if (token && token.isCancellationRequested) return;
+      const dir = dirs[idx++];
+      try {
+        const l = await client.list(dir);
+        result.set(dir, l.filter((e) => e.type === '-'));
+      } catch {
+        result.set(dir, []); // dir missing → its files count as new
+      }
+      done++;
+      if (progress) progress.report({ increment: 100 / dirs.length, message: `${done}/${dirs.length} folders` });
+    }
+  }
+  try {
+    await Promise.all(clients.map((c) => worker(c)));
+  } finally {
+    for (const c of clients) {
+      try {
+        await c.end();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  if (token && token.isCancellationRequested) throw new Error('cancelled');
+  return result;
+}
+
+function clearSynced(cfg, rel) {
+  const m = getManifest(cfg);
+  if (m[rel] !== undefined) {
+    delete m[rel];
+    _mfDirty = true;
+    if (!_mfTimer) _mfTimer = setTimeout(persistManifest, 1500);
+  }
+}
+
+// Sync session journal (last 5 per target) for Undo. Records, per completed
+// file, where its previous version was backed up (overwrite) or that it was
+// newly created — enough to revert a whole sync. Only populated when backups
+// are on (enterprise / backupBeforeOverwrite), since that produces the
+// restore points. Items capped to bound storage.
+function journalKey(cfg) {
+  return `quicksync.journal:${cfg.host}:${cfg.port || 22}:${cfg.remotePath}`;
+}
+function getJournal(cfg) {
+  return extContext.workspaceState.get(journalKey(cfg)) || [];
+}
+let _journalRef = null;
+let _journalCfg = null;
+let _journalTimer = null;
+function scheduleJournalPersist() {
+  if (_journalTimer) return;
+  _journalTimer = setTimeout(() => {
+    _journalTimer = null;
+    if (_journalRef && _journalCfg) {
+      extContext.workspaceState.update(journalKey(_journalCfg), _journalRef);
+    }
+  }, 1500);
+}
+function startSession(cfg, label) {
+  const journal = getJournal(cfg);
+  const session = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: Date.now(), label, items: [], undone: false };
+  journal.unshift(session);
+  while (journal.length > 5) journal.pop();
+  _journalRef = journal;
+  _journalCfg = cfg;
+  extContext.workspaceState.update(journalKey(cfg), journal);
+  return session;
+}
+function recordSessionItem(session, entry) {
+  if (!session) return;
+  if (session.items.length < 8000) session.items.push(entry);
+  scheduleJournalPersist();
+}
 
 // Side-effect-free read of the workspace quicksync.json "ignore" array.
 function getWorkspaceIgnore() {
@@ -354,7 +454,7 @@ async function walk(dir, root, ignoreList, files = [], realRoot = null) {
       await walk(full, root, ignoreList, files, realRoot);
     } else if (entry.isFile()) {
       const st = await fs.promises.stat(full);
-      files.push({ full, rel, mtime: st.mtimeMs });
+      files.push({ full, rel, mtime: st.mtimeMs, size: st.size });
     }
   }
   return files;
@@ -713,18 +813,64 @@ async function runSync(onlyChanged) {
       );
     }
 
-    const manifestEmpty = Object.keys(getManifest(cfg)).length === 0;
-    // "Changed" = modified since recorded in the manifest (resumable across
-    // restarts and partial syncs). "All" uploads everything.
-    const files = onlyChanged ? allFiles.filter((f) => isChangedFile(cfg, f.rel, f.mtime)) : allFiles;
+    // "Changed" = files missing on the server or a different size. We compare
+    // against the actual remote tree, so already-uploaded files are skipped
+    // regardless of manifests/restarts/partial syncs. "All" uploads everything.
+    let files = allFiles;
+    if (onlyChanged) {
+      const base = cfg.remotePath.replace(/\\/g, '/').replace(/\/$/, '') || '/';
+      // Only the folders that actually contain local files (deduped) — not the
+      // whole remote tree. Map each local file to its remote path + parent dir.
+      const remoteOf = new Map();
+      const dirSet = new Set();
+      for (const f of allFiles) {
+        const remoteFull = base + '/' + f.rel.split(path.sep).join('/');
+        remoteOf.set(f, remoteFull);
+        dirSet.add(path.posix.dirname(remoteFull));
+      }
+      const dirs = [...dirSet];
+      // Use up to 6 parallel connections for listing (capped inside the helper).
+      const concurrency = Math.max(4, vscode.workspace.getConfiguration('quicksync').get('concurrentTransfers', 4));
+      let listing;
+      try {
+        listing = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `QuickSync: comparing ${dirs.length} folder(s) with server…`,
+            cancellable: true,
+          },
+          (progress, token) => listRemoteDirs(cfg, dirs, concurrency, progress, token)
+        );
+      } catch (err) {
+        if (err && err.message === 'cancelled') {
+          vscode.window.showInformationMessage('QuickSync: comparison cancelled.');
+        } else {
+          vscode.window.showErrorMessage(`QuickSync: could not compare with the server (${err.message}).`);
+        }
+        return;
+      }
+      if (dirs.length > 300) {
+        vscode.window.showInformationMessage(
+          `QuickSync: compared ${dirs.length} folders. Tip: add node_modules / vendor / dist to "ignore" (or use "Sync Recently Modified") for much faster syncs.`
+        );
+      }
+      const remoteSizes = new Map(); // remoteFullPath → size
+      for (const [dir, items] of listing) {
+        for (const it of items) remoteSizes.set(dir + '/' + it.name, it.size);
+      }
+      files = allFiles.filter((f) => {
+        const sz = remoteSizes.get(remoteOf.get(f));
+        return sz === undefined || sz !== f.size; // new on server, or different size
+      });
+    }
 
     if (files.length === 0) {
-      vscode.window.showInformationMessage('QuickSync: nothing to upload — everything is up to date.');
+      vscode.window.showInformationMessage('QuickSync: nothing to upload — everything matches the server.');
       return;
     }
 
-    // H-4: explicit confirmation before a full/first mass overwrite.
-    const fullSync = !onlyChanged || manifestEmpty;
+    // H-4: explicit confirmation before a full mass overwrite.
+    const fullSync = !onlyChanged;
     if (fullSync) {
       const ok = await vscode.window.showWarningMessage(
         `QuickSync will upload ${files.length} file(s) to ${cfg.username}@${cfg.host}:${cfg.remotePath} and OVERWRITE existing remote files. Continue?`,
@@ -739,6 +885,68 @@ async function runSync(onlyChanged) {
     await enqueueEntries(cfg, files, { confirm: false });
   } finally {
     isSyncing = false; // released after enqueueing; uploads continue in the queue
+  }
+}
+
+// Upload files modified within the last N minutes. Purely local (no remote
+// listing) so it's fast, and goes through the same safe path: trust check,
+// deny-list (via walk), explicit confirmation, and the atomic, host-verified
+// transfer queue.
+async function syncRecentCommand() {
+  if (!vscode.workspace.isTrusted) {
+    vscode.window.showWarningMessage('QuickSync is disabled in untrusted workspaces.');
+    return;
+  }
+  if (isSyncing) {
+    vscode.window.showInformationMessage('QuickSync: a sync is already in progress.');
+    return;
+  }
+  const pick = await vscode.window.showQuickPick(
+    [
+      { label: 'Last 15 minutes', m: 15 },
+      { label: 'Last 30 minutes', m: 30 },
+      { label: 'Last 1 hour', m: 60 },
+      { label: 'Last 3 hours', m: 180 },
+      { label: 'Custom…', m: 0 },
+    ],
+    { placeHolder: 'Upload files modified within…' }
+  );
+  if (!pick) return;
+  let minutes = pick.m;
+  if (minutes === 0) {
+    const v = await vscode.window.showInputBox({
+      prompt: 'Upload files modified within how many minutes?',
+      value: '30',
+      validateInput: (s) => (/^\d+$/.test(s) && Number(s) > 0 ? null : 'Enter a positive whole number of minutes'),
+    });
+    if (!v) return;
+    minutes = parseInt(v, 10);
+  }
+
+  isSyncing = true;
+  try {
+    const cfg = await resolveConfig();
+    if (!cfg) {
+      vscode.window.showWarningMessage('QuickSync: no config found.');
+      return;
+    }
+    const root = getWorkspaceRoot();
+    const all = await walk(root, root, cfg.ignore || []); // deny-list + ignore applied
+    const cutoff = Date.now() - minutes * 60000;
+    const files = all.filter((f) => f.mtime >= cutoff);
+    if (files.length === 0) {
+      vscode.window.showInformationMessage(`QuickSync: no files modified in the last ${minutes} minute(s).`);
+      return;
+    }
+    const ok = await vscode.window.showWarningMessage(
+      `Upload ${files.length} file(s) modified in the last ${minutes} min to ${cfg.username}@${cfg.host}:${cfg.remotePath} (overwrites existing)?`,
+      { modal: true },
+      'Upload'
+    );
+    if (ok !== 'Upload') return;
+    await enqueueEntries(cfg, files, { confirm: false });
+  } finally {
+    isSyncing = false;
   }
 }
 
@@ -878,11 +1086,18 @@ async function enqueueEntries(cfg, files, opts = {}) {
   } catch {
     /* dirs best-effort */
   }
+  // Track this batch as an undoable session when backups are on.
+  const undoable = enterpriseMode() || vscode.workspace.getConfiguration('quicksync').get('backupBeforeOverwrite', false);
+  const session = undoable ? startSession(cfg, `${files.length} file(s)`) : null;
   for (const f of files) {
     const remote = base + '/' + f.rel.split(path.sep).join('/');
     transferQueue.enqueue(f.full, remote, f.rel, {
-      onComplete: (state) => {
-        if (state === 'Completed') markSynced(cfg, f.rel, f.mtime);
+      onComplete: (state, info) => {
+        if (state !== 'Completed') return;
+        markSynced(cfg, f.rel, f.mtime);
+        if (session) {
+          recordSessionItem(session, { remote, rel: f.rel, backup: info && info.backup, existed: info ? !!info.existed : undefined });
+        }
       },
     });
   }
@@ -955,7 +1170,7 @@ async function flushAutoSync() {
       } catch {
         continue;
       }
-      files.push({ full, rel, mtime: st.mtimeMs });
+      files.push({ full, rel, mtime: st.mtimeMs, size: st.size });
     }
   }
   // Auto-sync never prompts: silently drop always-ignored + flagged-sensitive files.
@@ -1149,6 +1364,95 @@ async function clearCredentials() {
   vscode.window.showInformationMessage('QuickSync: saved credentials cleared.');
 }
 
+// Undo a sync: restore overwritten files from backup, delete files that were
+// newly created. Safe — confirms first, never deletes a file that existed
+// before the sync, stays within the target, and is audit-logged.
+async function undoSyncCommand(latest) {
+  if (!requireTrust()) return;
+  const cfg = await resolveConfig();
+  if (!cfg) {
+    vscode.window.showWarningMessage('QuickSync: no config found.');
+    return;
+  }
+  const journal = getJournal(cfg).filter((s) => !s.undone && s.items && s.items.length);
+  if (journal.length === 0) {
+    vscode.window.showInformationMessage(
+      'QuickSync: no undoable syncs found. (Undo records restore points only when backups are on — enable Enterprise mode or quicksync.backupBeforeOverwrite.)'
+    );
+    return;
+  }
+  let session = journal[0];
+  if (!latest) {
+    const pick = await vscode.window.showQuickPick(
+      journal.map((s) => ({ label: new Date(s.ts).toLocaleString(), description: `${s.items.length} file(s)`, s })),
+      { placeHolder: 'Undo which sync?' }
+    );
+    if (!pick) return;
+    session = pick.s;
+  }
+  const restorable = session.items.filter((i) => i.backup).length;
+  const removable = session.items.filter((i) => !i.backup && i.existed === false).length;
+  const ok = await vscode.window.showWarningMessage(
+    `Undo sync from ${new Date(session.ts).toLocaleString()} (${session.items.length} file(s))?\n\n` +
+      `${restorable} overwritten file(s) will be restored from backup; ${removable} newly-created file(s) will be deleted. Files that existed before and weren't backed up are left untouched.`,
+    { modal: true },
+    'Undo'
+  );
+  if (ok !== 'Undo') return;
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'QuickSync: undoing sync…' },
+    async () => {
+      let sftp;
+      try {
+        sftp = await connection.getClient();
+      } catch {
+        vscode.window.showErrorMessage('QuickSync: not connected.');
+        return;
+      }
+      let restored = 0;
+      let deleted = 0;
+      let failed = 0;
+      for (const it of session.items) {
+        try {
+          if (it.backup) {
+            // Move the backup back over the current file (atomic where possible).
+            try {
+              await sftp.posixRename(it.backup, it.remote);
+            } catch {
+              try {
+                await sftp.delete(it.remote);
+              } catch {
+                /* may not exist */
+              }
+              await sftp.rename(it.backup, it.remote);
+            }
+            restored++;
+            auditLogger.log('restore', { remotePath: it.remote, from: it.backup, detail: 'undo', result: 'ok' });
+          } else if (it.existed === false) {
+            await sftp.delete(it.remote);
+            deleted++;
+            auditLogger.log('delete', { remotePath: it.remote, detail: 'undo-new', result: 'ok' });
+          }
+          if (it.rel) clearSynced(cfg, it.rel); // reverted → mark changed so it re-syncs
+        } catch {
+          failed++;
+        }
+      }
+      session.undone = true;
+      try {
+        await extContext.workspaceState.update(journalKey(cfg), getJournal(cfg).map((s) => (s.id === session.id ? session : s)));
+      } catch {
+        /* ignore */
+      }
+      vscode.commands.executeCommand('quicksync.remote.refresh');
+      vscode.window.showInformationMessage(
+        `QuickSync: undo complete — restored ${restored}, deleted ${deleted}${failed ? `, ${failed} failed` : ''}.`
+      );
+    }
+  );
+}
+
 // Phase 7: reset the per-workspace "always ignore" safety list.
 async function clearSafetyIgnores() {
   await extContext.globalState.update(safetyIgnoreKey(), undefined);
@@ -1188,10 +1492,14 @@ function activate(context) {
     ),
     vscode.commands.registerCommand('quicksync.syncFolder', (uri) => syncUris(uri ? [uri] : [])),
     vscode.commands.registerCommand('quicksync.syncWorkspace', () => runSync(false)),
+    vscode.commands.registerCommand('quicksync.syncRecent', () => syncRecentCommand()),
     // Phase 4: compare
     vscode.commands.registerCommand('quicksync.compareWithRemote', (uri) => compareWithRemoteCommand(uri)),
     // Phase 7: safety
-    vscode.commands.registerCommand('quicksync.clearSafetyIgnores', () => clearSafetyIgnores())
+    vscode.commands.registerCommand('quicksync.clearSafetyIgnores', () => clearSafetyIgnores()),
+    // Undo
+    vscode.commands.registerCommand('quicksync.undoLastSync', () => undoSyncCommand(true)),
+    vscode.commands.registerCommand('quicksync.undoSync', () => undoSyncCommand(false))
   );
 
   // Phases 1+3: native remote explorer + transfer queue, sharing one connection.
@@ -1215,6 +1523,19 @@ function activate(context) {
   vscode.commands.executeCommand('setContext', 'quicksync.connected', false);
   transferQueue = registerTransferQueue(context, { audit: auditLogger });
   transferQueue.bindConnection(conn);
+  // When a batch finishes: flush the sync manifest and report the result so
+  // it's clear what uploaded vs failed (failed files remain "changed" to retry).
+  transferQueue.onIdle = (done, failed) => {
+    persistManifest();
+    if (!done && !failed) return;
+    if (failed) {
+      vscode.window.showWarningMessage(
+        `QuickSync: sync finished — ${done} uploaded, ${failed} failed. Run "Sync Changed Files" again to retry the failed ones.`
+      );
+    } else {
+      vscode.window.showInformationMessage(`QuickSync: sync finished — ${done} file(s) uploaded ✓`);
+    }
+  };
   registerRemoteExplorer(context, { loadConfig: resolveConfig, connectSftp, audit: auditLogger }, conn, transferQueue);
 
   // Site Manager — multi-site profiles driving the shared connection.

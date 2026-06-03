@@ -118,6 +118,7 @@ function getHtml(webview, mediaUri, n) {
 
 function registerDualPane(context, deps) {
   let panel = null;
+  const dlog = []; // recent downloads (the transfer queue is upload-only)
 
   function reveal() {
     if (panel) {
@@ -136,9 +137,15 @@ function registerDualPane(context, deps) {
     const ticker = setInterval(() => {
       if (!panel) return;
       const q = deps.getQueue && deps.getQueue();
-      if (!q || !q.items) return;
-      const items = q.items.slice(-60).map((t) => ({ label: t.label, state: t.state, percent: t.percent, total: t.total }));
-      panel.webview.postMessage({ type: 'transfers', items });
+      const ups = (q && q.items ? q.items.slice(-50) : []).map((t) => ({
+        label: t.label,
+        state: t.state,
+        percent: t.percent,
+        total: t.total,
+        dir: 'up',
+      }));
+      const downs = dlog.slice(-20).map((d) => ({ label: d.label, state: d.state, percent: d.percent || 0, total: d.total, dir: 'down' }));
+      panel.webview.postMessage({ type: 'transfers', items: ups.concat(downs) });
     }, 600);
     panel.onDidDispose(() => {
       clearInterval(ticker);
@@ -444,13 +451,18 @@ function registerDualPane(context, deps) {
         logToView('Refused: ' + v.target + ' is outside the workspace.');
         continue;
       }
+      const entry = { label: POSIX.basename(v.norm), total: undefined, state: 'Downloading', percent: 0 };
+      dlog.push(entry);
+      if (dlog.length > 40) dlog.shift();
       try {
         fs.mkdirSync(path.dirname(v.target), { recursive: true });
         if (v.isDir) await sftp.downloadDir(v.norm, v.target);
         else await sftp.fastGet(v.norm, v.target);
+        entry.state = 'Completed';
         done++;
         logToView('Downloaded ' + POSIX.basename(v.norm));
       } catch {
+        entry.state = 'Failed';
         logToView('Download failed: ' + POSIX.basename(v.norm));
       }
     }
